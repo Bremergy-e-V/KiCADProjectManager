@@ -1,0 +1,51 @@
+# Maintainer: Marvin <m.lohss04@gmail.com>
+#
+# Built by .github/workflows/release.yml, which templates pkgver, _build and
+# _repository and feeds in a git-archive tarball of the commit being released.
+pkgname=kicad-project-manager
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Team project browser for KiCad projects on Gitea, GitHub or GitLab"
+arch=('any')
+url="https://github.com/Bremergy-e-V/KiCADProjectManager"
+license=('MIT')
+depends=('python' 'pyside6' 'python-keyring' 'git' 'hicolor-icon-theme')
+optdepends=(
+    'kicad: open projects and render preview images'
+    'polkit: install updates from inside the app'
+)
+makedepends=('python-build' 'python-installer' 'python-hatchling' 'python-wheel')
+checkdepends=('python-pytest')
+options=('!debug')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+# Release build number (the workflow's run number) and the GitHub repository the
+# updater reads its releases from. 0 marks a local build that never updates.
+_build=0
+_repository=Bremergy-e-V/KiCADProjectManager
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    printf 'BUILD = %s\nREPOSITORY = "%s"\n' "$_build" "$_repository" > src/kicad_project_manager/_build.py
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    python -m build --wheel --no-isolation
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    # The view tests create widgets; the offscreen platform plugin needs no display.
+    QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest -q
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    python -m installer --destdir="$pkgdir" dist/*.whl
+    install -Dm644 packaging/linux/kicad-project-manager.desktop "$pkgdir/usr/share/applications/kicad-project-manager.desktop"
+    install -Dm644 src/kicad_project_manager/resources/kicad-project-manager.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/kicad-project-manager.svg"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

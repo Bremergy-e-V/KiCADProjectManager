@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=KiCad Project Manager
+GenericName=PCB Project Browser
+Comment=Browse, download and open your team's KiCad projects from Gitea
+Exec=kicad-project-manager
+Icon=kicad-project-manager
+Terminal=false
+Categories=Development;Electronics;Engineering;
+Keywords=KiCad;KiCAD;PCB;Gitea;Projects;ProjectManager;EDA;
+StartupWMClass=kicad-project-manager

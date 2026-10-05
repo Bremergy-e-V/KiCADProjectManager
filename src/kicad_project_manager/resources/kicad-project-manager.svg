@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f7d4a"/>
+      <stop offset="1" stop-color="#1d5a33"/>
+    </linearGradient>
+    <linearGradient id="folder" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd166"/>
+      <stop offset="1" stop-color="#f4a62a"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="116" height="116" rx="24" fill="url(#bg)"/>
+  <!-- traces -->
+  <g stroke="#7fd19b" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.55">
+    <path d="M18 30 H40 L48 22 H70"/>
+    <path d="M110 34 H92 L84 26"/>
+    <path d="M18 104 H34"/>
+    <path d="M110 104 H96"/>
+  </g>
+  <g fill="#c9f0d6" opacity="0.7">
+    <circle cx="70" cy="22" r="4"/>
+    <circle cx="84" cy="26" r="4"/>
+    <circle cx="18" cy="30" r="4"/>
+  </g>
+  <!-- folder -->
+  <path d="M24 46 a6 6 0 0 1 6 -6 h22 l8 8 h38 a6 6 0 0 1 6 6 v44 a6 6 0 0 1 -6 6 H30 a6 6 0 0 1 -6 -6 Z" fill="#d98b16"/>
+  <path d="M24 58 a6 6 0 0 1 6 -6 h68 a6 6 0 0 1 6 6 v40 a6 6 0 0 1 -6 6 H30 a6 6 0 0 1 -6 -6 Z" fill="url(#folder)"/>
+  <!-- chip -->
+  <g stroke="#3a3a3a" stroke-width="3" stroke-linecap="round">
+    <path d="M56 66 v-5 M64 66 v-5 M72 66 v-5 M56 94 v5 M64 94 v5 M72 94 v5"/>
+    <path d="M50 72 h-5 M50 80 h-5 M50 88 h-5 M78 72 h5 M78 80 h5 M78 88 h5"/>
+  </g>
+  <rect x="50" y="66" width="28" height="28" rx="3" fill="#2b2b2b"/>
+  <circle cx="56" cy="72" r="2" fill="#9a9a9a"/>
+</svg>
