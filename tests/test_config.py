@@ -109,3 +109,36 @@ def test_preview_files_committed(git, make_bare, tmp_path):
     other = ConfigRepo(git, tmp_path / "other", url)
     other.open()
     assert other.preview_file("abc").read_bytes() == b"png"
+
+
+def test_templates_added_and_listed(git, make_bare, tmp_path):
+    url = make_bare("config")
+    repo = ConfigRepo(git, tmp_path / "c", url)
+    repo.open()
+    repo.initialize(Config(name="PCBs"))
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "Board.kicad_pro").write_text("{}")
+    (source / "README.md").write_text("# Board")
+    (source / ".git").mkdir()
+    repo.mutate(lambda _c, r: r.add_template("4-Layer", source), "template")
+    with pytest.raises(ConfigError):
+        repo.mutate(lambda _c, r: r.add_template("4-layer", source), "duplicate")
+    for bad in ("a:b", ".hidden", ""):
+        with pytest.raises(ConfigError):
+            repo.add_template(bad, source)
+
+    other = ConfigRepo(git, tmp_path / "other", url)
+    other.open()
+    templates = other.templates()
+    assert list(templates) == ["4-Layer"]
+    assert {p.name for p in templates["4-Layer"].iterdir()} == {"Board.kicad_pro"}
+
+
+def test_legacy_template_folder_still_offered(git, make_bare, tmp_path):
+    repo = ConfigRepo(git, tmp_path / "c", make_bare("config"))
+    repo.open()
+    repo.initialize(Config(name="PCBs"))
+    (repo.path / "template").mkdir()
+    (repo.path / "template" / "T.kicad_pro").write_text("{}")
+    assert list(repo.templates()) == ["Team template"]

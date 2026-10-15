@@ -15,8 +15,11 @@ Git runs underneath, but nobody has to set it up or type a git command.
   - *Changes not on server yet*
   - *Not downloaded*
 - **Double-click to work.** The first time, this downloads the project. After that, it gets the latest version and opens the project in KiCad.
-- **New Project** creates the repository on the server, sets up a KiCad project from your team template (or a blank one) with sensible `.gitignore`/`.gitattributes` files, and adds it to the current folder.
+- **New Project** creates the repository on the server, sets up a KiCad project from one of your team templates (or a blank one) with sensible `.gitignore`/`.gitattributes` files, and adds it to the current folder.
 - **Add Existing** adds any number of existing repositories to the current folder.
+- **Import Local** uploads a KiCad project from your computer: it creates a new repository, copies the project into your projects folder (without backups, lock and autosave files) and adds it to the current folder. The original folder is left untouched.
+- **Convert to Template** (right-click a project) turns the server version of a project into a template that everyone can pick under *New Project*.
+- **Revert to Server State** (right-click a project) throws away all your local changes, including saves that never reached the server, after asking for confirmation.
 - **Save to server** uploads your changes with a short description. If a teammate changed something else in the meantime, the two sets of changes are combined automatically. If you both changed the same thing, nothing is lost: your version goes to a separate branch on the server and you get a clear message (see [Conflicts](#conflicts)).
 - **No git setup needed.** You sign in with a personal access token. The app passes it to git itself, so there are no SSH keys or credential helpers to configure, and the token is never written into a remote URL. The token is kept in the system keychain, and commits are made with your account's name.
 - **Updates itself.** On start, the app checks for a new release and offers to install it. You can choose *Update Now*, *Not Now* or *Skip This Version*.
@@ -57,7 +60,7 @@ All shared state lives in a **config repository** on your server:
 ```
 kicad-projects.json      folder structure and project list
 previews/<id>.png        one preview image per project
-template/                optional: KiCad project used for "New Project"
+templates/<name>/        optional: KiCad projects offered as templates for "New Project"
 README.md
 ```
 
@@ -72,9 +75,9 @@ If someone else pushed in between, the app pulls again and re-applies the change
 
 Projects are normal repositories on the same server. They're downloaded to `~/KiCadProjects/<owner>/<repo>` by default (you can change this in Settings).
 
-## Team template
+## Team templates
 
-To use your own starting point for new projects, put a complete KiCad project into the `template/` folder of the config repository. For example, it could hold your title block, design rules, board stackup and library tables.
+Templates are the starting points offered under *New Project*. For example, one could hold your title block, design rules, 4-layer board stackup and library tables. The easiest way to make one is to set up a project the way you want it, then right-click it and choose **Convert to Template**. You can also put a complete KiCad project into a `templates/<name>/` folder of the config repository by hand. A `template/` folder from older versions is still offered as *Team template*.
 
 Files named like the template's `.kicad_pro` are renamed after the new project. Everything else is copied as is.
 

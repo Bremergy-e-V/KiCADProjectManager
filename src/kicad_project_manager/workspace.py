@@ -6,6 +6,7 @@ not after git commands:
 * :meth:`Workspace.download` - clone a project
 * :meth:`Workspace.get_latest` - pull new changes from the server
 * :meth:`Workspace.save` - commit everything and push it
+* :meth:`Workspace.revert` - discard local changes and go back to the server version
 
 If two people changed the same project, :meth:`Workspace.save` never leaves the
 user in a half-merged state. When git can combine the changes automatically it
@@ -55,6 +56,9 @@ GITATTRIBUTES = """\
 fp-lib-table  text eol=lf
 sym-lib-table text eol=lf
 """
+
+# Not copied when importing a project from the user's disk.
+_IMPORT_IGNORE = shutil.ignore_patterns(".git", "*.lck", "_autosave-*", "*-backups", ".history", "fp-info-cache")
 
 _PRO_TEMPLATE = """\
 {{
@@ -203,6 +207,19 @@ class Workspace:
         self._git(project, "push", "-q", "-u", "origin", "HEAD")
         return f"Saved to server{combined}."
 
+    def revert(self, project: Project) -> str:
+        """Discard all local changes and unsaved commits; make the copy match the server."""
+        state = self.state(project)
+        if state.offline:
+            raise WorkspaceError("Could not reach the server.")
+        if not self._has_upstream(project):
+            raise WorkspaceError("This project has no version on the server yet, so there is nothing to go back to.")
+        self._git(project, "reset", "-q", "--hard", "@{u}")
+        self._git(project, "clean", "-q", "-fd")
+        if state.changed_files or state.ahead or state.behind:
+            return "Local changes discarded, now matches the server."
+        return "Already matches the server."
+
     def _combine(self, project: Project, username: str = "") -> None:
         """Rebase local commits onto the server; on conflict upload them to a rescue branch."""
         try:
@@ -217,12 +234,7 @@ class Workspace:
 
     def create(self, project: Project, url: str, title: str, template: Path | None = None) -> Path:
         """Create a new KiCad project locally and push it to the (empty) remote."""
-        dest = self.path_for(project)
-        if dest.exists() and any(dest.iterdir()):
-            raise WorkspaceError(f"The folder {dest} already exists.")
-        dest.mkdir(parents=True, exist_ok=True)
-        self.git.run("init", "-q", "-b", "main", str(dest))
-        self._git(project, "remote", "add", "origin", url)
+        dest = self._init(project, url)
         base = project.repo_name
         if template is not None and any(template.glob("*.kicad_pro")):
             copy_template(template, dest, base)
@@ -231,6 +243,33 @@ class Workspace:
             (dest / f"{base}.kicad_sch").write_text(
                 _SCH_TEMPLATE.format(uuid=uuid.uuid4(), title=title.replace('"', "'")), encoding="utf-8", newline="\n"
             )
+        self._publish(project, title, f"Create project {title}")
+        return dest
+
+    def import_local(self, project: Project, url: str, title: str, source: Path) -> Path:
+        """Copy a KiCad project from the user's disk into the workspace and push it to the (empty) remote."""
+        source = source.resolve()
+        if not any(source.glob("*.kicad_pro")):
+            raise WorkspaceError(f"The folder {source} contains no KiCad project (.kicad_pro) file.")
+        if self.path_for(project).resolve().is_relative_to(source):
+            raise WorkspaceError(f"The folder {source} contains your projects folder. Please choose the folder of a single project.")
+        dest = self._init(project, url)
+        shutil.copytree(source, dest, ignore=_IMPORT_IGNORE, dirs_exist_ok=True)
+        self._publish(project, title, f"Import project {title}")
+        return dest
+
+    def _init(self, project: Project, url: str) -> Path:
+        dest = self.path_for(project)
+        if dest.exists() and any(dest.iterdir()):
+            raise WorkspaceError(f"The folder {dest} already exists.")
+        dest.mkdir(parents=True, exist_ok=True)
+        self.git.run("init", "-q", "-b", "main", str(dest))
+        self._git(project, "remote", "add", "origin", url)
+        return dest
+
+    def _publish(self, project: Project, title: str, message: str) -> None:
+        """Add the usual git files and a README, make the first commit and push it."""
+        dest = self.path_for(project)
         for name, text in ((".gitignore", GITIGNORE), (".gitattributes", GITATTRIBUTES)):
             if not (dest / name).exists():
                 (dest / name).write_text(text, encoding="utf-8", newline="\n")
@@ -238,9 +277,8 @@ class Workspace:
             text = f"# {title}\n\n{project.description}\n" if project.description else f"# {title}\n"
             (dest / "README.md").write_text(text, encoding="utf-8", newline="\n")
         self._git(project, "add", "-A")
-        self._git(project, "commit", "-q", "-m", f"Create project {title}")
+        self._git(project, "commit", "-q", "-m", message)
         self._git(project, "push", "-q", "-u", "origin", "main")
-        return dest
 
 
 def copy_template(template: Path, dest: Path, base: str) -> None:

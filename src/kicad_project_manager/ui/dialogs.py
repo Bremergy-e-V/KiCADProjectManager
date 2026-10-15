@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
@@ -335,10 +336,24 @@ class InitConfigDialog(QDialog):
 
 
 class NewProjectDialog(QDialog):
-    def __init__(self, owners: list[str], default_owner: str, default_private: bool, folder: str, parent=None):
+    def __init__(
+        self,
+        owners: list[str],
+        default_owner: str,
+        default_private: bool,
+        folder: str,
+        templates: list[str] | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("New KiCad project")
         self.setMinimumWidth(480)
+        self.template = QComboBox()
+        self.template.addItem("Blank project", None)
+        for name in templates or []:
+            self.template.addItem(name, name)
+        if templates:
+            self.template.setCurrentIndex(1)
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. Motor Controller")
         self.repo = QLineEdit()
@@ -357,15 +372,17 @@ class NewProjectDialog(QDialog):
         self.name.textChanged.connect(self._name_changed)
         self.repo.textEdited.connect(lambda *_: setattr(self, "_repo_edited", True))
 
-        form = QFormLayout()
+        self.form = form = QFormLayout()
         form.addRow("Folder:", QLabel(folder))
+        if templates is not None:
+            form.addRow("Template:", self.template)
         form.addRow("Project name:", self.name)
         form.addRow("Repository name:", self.repo)
         form.addRow("Create in:", self.owner)
         form.addRow("Description:", self.description)
         form.addRow("", self.private)
         form.addRow("", self.open_after)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons = buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Create")
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
@@ -378,8 +395,13 @@ class NewProjectDialog(QDialog):
         if not self._repo_edited:
             self.repo.setText(slugify(text))
 
+    def _check(self) -> str:
+        return ""
+
     def _accept(self) -> None:
-        if not self.name.text().strip():
+        if problem := self._check():
+            self.error.setText(problem)
+        elif not self.name.text().strip():
             self.error.setText("Please enter a project name.")
         elif not REPO_NAME_RE.match(self.repo.text().strip()) or self.repo.text().strip().endswith(".git"):
             self.error.setText("The repository name may only contain letters, digits, '-', '_' and '.'.")
@@ -387,6 +409,59 @@ class NewProjectDialog(QDialog):
             self.accept()
             return
         self.error.show()
+
+
+class ImportProjectDialog(NewProjectDialog):
+    """Upload a KiCad project from the local disk to a new repository."""
+
+    def __init__(self, owners: list[str], default_owner: str, default_private: bool, folder: str, parent=None):
+        super().__init__(owners, default_owner, default_private, folder, parent=parent)
+        self.setWindowTitle("Import KiCad project")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Import")
+        self.open_after.setText("Open in KiCad when imported")
+        self.source = QLineEdit()
+        self.source.setPlaceholderText("Folder that contains the .kicad_pro file")
+        self.source.editingFinished.connect(self._source_changed)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse)
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(self.source)
+        row_layout.addWidget(browse)
+        self.form.insertRow(1, "Local project:", row)
+        hint = QLabel(
+            "The project is copied into your projects folder and uploaded. "
+            "Afterwards, work on it from here - the original folder is left as it is but no longer used."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: palette(placeholder-text);")
+        self.layout().insertWidget(1, hint)
+
+    def _browse(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Choose the folder of the KiCad project", self.source.text())
+        if path:
+            self.source.setText(path)
+            self._source_changed()
+
+    def _source_changed(self) -> None:
+        source = Path(self.source.text().strip())
+        pro = next(iter(sorted(source.glob("*.kicad_pro"))), None) if self.source.text().strip() else None
+        if pro is not None and not self.name.text().strip():
+            self.name.setText(pro.stem)
+
+    def source_path(self) -> Path:
+        return Path(self.source.text().strip()).expanduser()
+
+    def _check(self) -> str:
+        text = self.source.text().strip()
+        if not text:
+            return "Please choose the folder of the KiCad project."
+        if not self.source_path().is_dir():
+            return "The chosen folder does not exist."
+        if not any(self.source_path().glob("*.kicad_pro")):
+            return "The chosen folder contains no KiCad project (.kicad_pro) file."
+        return ""
 
 
 class AddExistingDialog(QDialog):

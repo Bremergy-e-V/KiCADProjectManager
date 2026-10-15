@@ -98,3 +98,43 @@ def test_lock_files_detected(setup):
     assert alice.open_lock_files(PROJECT) == []
     edit(alice, "~motor.kicad_sch.lck", "{}")
     assert len(alice.open_lock_files(PROJECT)) == 1
+
+
+def test_revert_discards_local_changes_and_commits(setup):
+    alice, _ = setup
+    edit(alice, "motor.kicad_sch", "changed")
+    edit(alice, "new.txt", "new")
+    alice._git(PROJECT, "add", "-A")
+    alice._git(PROJECT, "commit", "-q", "-m", "local only")
+    edit(alice, "motor.kicad_pro", "also changed")
+    assert "discarded" in alice.revert(PROJECT)
+    state = alice.state(PROJECT)
+    assert (state.ahead, state.behind, state.changed_files) == (0, 0, [])
+    assert not (alice.path_for(PROJECT) / "new.txt").exists()
+    assert "changed" not in (alice.path_for(PROJECT) / "motor.kicad_sch").read_text()
+    assert "Already" in alice.revert(PROJECT)
+
+
+def test_import_local_project(git, make_bare, tmp_path):
+    source = tmp_path / "old" / "Amp"
+    (source / "Amp-backups").mkdir(parents=True)
+    (source / "Amp.kicad_pro").write_text("{}")
+    (source / "Amp.kicad_pcb").write_text("()")
+    (source / "~Amp.kicad_pcb.lck").write_text("{}")
+    (source / "Amp-backups" / "old.zip").write_text("x")
+    project = Project("Amplifier", "team/amp", id="a")
+    url = make_bare("amp")
+    alice = Workspace(git, tmp_path / "alice")
+    alice.import_local(project, url, "Amplifier", source)
+    bob = Workspace(git, tmp_path / "bob")
+    bob.download(project, url)
+    files = {p.name for p in bob.path_for(project).iterdir()}
+    assert {"Amp.kicad_pro", "Amp.kicad_pcb", ".gitignore", "README.md"} <= files
+    assert not {"Amp-backups", "~Amp.kicad_pcb.lck"} & files
+    assert (source / "Amp.kicad_pro").exists()  # original left alone
+
+
+def test_import_requires_kicad_project(git, make_bare, tmp_path):
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(WorkspaceError):
+        Workspace(git, tmp_path / "ws").import_local(Project("X", "team/x"), make_bare("x"), "X", tmp_path / "empty")

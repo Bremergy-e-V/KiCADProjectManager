@@ -23,7 +23,9 @@ from .git import Git, GitError
 FORMAT_VERSION = 1
 CONFIG_FILE = "kicad-projects.json"
 PREVIEW_DIR = "previews"
-TEMPLATE_DIR = "template"
+TEMPLATES_DIR = "templates"
+LEGACY_TEMPLATE_DIR = "template"  # single team template used by older versions
+LEGACY_TEMPLATE_NAME = "Team template"
 
 FolderPath = tuple[str, ...]
 
@@ -42,6 +44,14 @@ def _check_name(name: str, what: str) -> str:
         raise ConfigError(f"The {what} name must not be empty.")
     if any(c in name for c in "/\\"):
         raise ConfigError(f"The {what} name must not contain '/' or '\\'.")
+    return name
+
+
+def check_template_name(name: str) -> str:
+    """Template names become folder names, so they must be valid on every OS."""
+    name = _check_name(name, "template")
+    if any(c in name for c in '<>:"|?*') or name.endswith(".") or name.startswith("."):
+        raise ConfigError("The template name must not contain any of < > : \" | ? * or start or end with '.'.")
     return name
 
 
@@ -241,7 +251,7 @@ This repository is managed by **KiCad Project Manager**.
 
 * `{config}` - folder structure and project list
 * `{previews}/` - preview images (one PNG per project id)
-* `{template}/` - optional: a KiCad project used as the template for new projects
+* `{templates}/<name>/` - optional: KiCad projects offered as templates for new projects
 
 Please edit it through the app rather than by hand.
 """
@@ -262,8 +272,32 @@ class ConfigRepo:
         return self.path / CONFIG_FILE
 
     @property
-    def template_dir(self) -> Path:
-        return self.path / TEMPLATE_DIR
+    def templates_dir(self) -> Path:
+        return self.path / TEMPLATES_DIR
+
+    def templates(self) -> dict[str, Path]:
+        """Project templates by name, sorted. Each one is a folder holding a KiCad project."""
+        with self.lock:
+            found: dict[str, Path] = {}
+            if self.templates_dir.is_dir():
+                for d in self.templates_dir.iterdir():
+                    if d.is_dir() and any(d.glob("*.kicad_pro")):
+                        found[d.name] = d
+            legacy = self.path / LEGACY_TEMPLATE_DIR
+            if any(legacy.glob("*.kicad_pro")) and LEGACY_TEMPLATE_NAME.casefold() not in {n.casefold() for n in found}:
+                found[LEGACY_TEMPLATE_NAME] = legacy
+            return dict(sorted(found.items(), key=lambda item: item[0].casefold()))
+
+    def add_template(self, name: str, source: Path) -> None:
+        """Copy the KiCad project in ``source`` to ``templates/<name>``. Use inside :meth:`mutate`."""
+        name = check_template_name(name)
+        if name.casefold() in {n.casefold() for n in self.templates()}:
+            raise ConfigError(f"A template named '{name}' already exists.")
+        if not any(source.glob("*.kicad_pro")):
+            raise ConfigError("This project contains no KiCad project (.kicad_pro) file.")
+        target = self.templates_dir / name
+        shutil.copytree(source, target, ignore=shutil.ignore_patterns(".git"))
+        (target / "README.md").unlink(missing_ok=True)  # each new project gets its own README
 
     def preview_file(self, project_id: str) -> Path:
         return self.path / PREVIEW_DIR / f"{project_id}.png"
@@ -336,7 +370,7 @@ class ConfigRepo:
             readme = self.path / "README.md"
             if not readme.exists():
                 readme.write_text(
-                    README_TEXT.format(name=config.name, config=CONFIG_FILE, previews=PREVIEW_DIR, template=TEMPLATE_DIR),
+                    README_TEXT.format(name=config.name, config=CONFIG_FILE, previews=PREVIEW_DIR, templates=TEMPLATES_DIR),
                     encoding="utf-8",
                     newline="\n",
                 )

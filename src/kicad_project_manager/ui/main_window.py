@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import APP_ID, APP_NAME, updater
-from ..config import Config, ConfigError, ConfigRepo, FolderPath, Project, format_path
+from ..config import Config, ConfigError, ConfigRepo, FolderPath, Project, check_template_name, format_path
 from ..forge import Forge, ForgeError, Repo, User, make_forge
 from ..git import Git, GitError, GitIdentity
 from ..preview import render_preview
@@ -44,6 +44,7 @@ from .dialogs import (
     AddExistingDialog,
     ConfigRepoDialog,
     ConnectDialog,
+    ImportProjectDialog,
     InitConfigDialog,
     NewProjectDialog,
     SaveDialog,
@@ -154,6 +155,12 @@ class MainWindow(QMainWindow):
             lambda: self.add_existing(),
             tip="Add existing repositories from the server",
         )
+        self.act_import = action(
+            "Import Local",
+            self._icon("document-import", sp.SP_DialogOpenButton),
+            lambda: self.import_project(),
+            tip="Upload a KiCad project from your computer to the server",
+        )
         self.act_new_folder = action(
             "New Folder", self._icon("folder-new", sp.SP_FileDialogNewFolder), lambda: self.new_folder(), "Ctrl+Shift+N"
         )
@@ -161,7 +168,7 @@ class MainWindow(QMainWindow):
             "Refresh", self._icon("view-refresh", sp.SP_BrowserReload), lambda: self.refresh(visible=True), QKeySequence.StandardKey.Refresh
         )
         self.act_settings = action("Settings", self._icon("preferences-system", sp.SP_FileDialogDetailedView), lambda: self.open_settings())
-        for a in (self.act_new_project, self.act_add_existing, self.act_new_folder):
+        for a in (self.act_new_project, self.act_add_existing, self.act_import, self.act_new_folder):
             toolbar.addAction(a)
         toolbar.addSeparator()
         toolbar.addAction(self.act_refresh)
@@ -231,7 +238,7 @@ class MainWindow(QMainWindow):
         self._set_enabled(False)
 
     def _set_enabled(self, enabled: bool) -> None:
-        for a in (self.act_new_project, self.act_add_existing, self.act_new_folder, self.act_refresh):
+        for a in (self.act_new_project, self.act_add_existing, self.act_import, self.act_new_folder, self.act_refresh):
             a.setEnabled(enabled)
 
     def _busy_changed(self, label: str) -> None:
@@ -969,17 +976,64 @@ class MainWindow(QMainWindow):
 
         self._project_task(pid, "Saving…", work, done, error_title="Could not save to server")
 
-    def new_project(self) -> None:
-        parent = self.current_path
+    def _owners(self) -> list[str] | None:
         try:
             with _WaitCursor():
-                owners = self.forge.owners()
+                return self.forge.owners()
         except ForgeError as e:
             self.show_error(e)
+            return None
+
+    def new_project(self) -> None:
+        parent = self.current_path
+        owners = self._owners()
+        if owners is None:
             return
-        dialog = NewProjectDialog(owners, self.config.default_owner, self.config.default_private, format_path(parent), self)
+        templates = list(self.config_repo.templates())
+        dialog = NewProjectDialog(owners, self.config.default_owner, self.config.default_private, format_path(parent), templates, self)
         if not dialog.exec():
             return
+        title = dialog.name.text().strip()
+        template_name = dialog.template.currentData()
+
+        def setup(project: Project, url: str) -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                template = None
+                with self.config_repo.lock:
+                    source = self.config_repo.templates().get(template_name) if template_name else None
+                    if source is not None:
+                        template = Path(tmp) / "template"
+                        shutil.copytree(source, template)
+                if template_name and template is None:
+                    raise WorkspaceError(f"The template '{template_name}' no longer exists. Someone may have removed it.")
+                self.workspace.create(project, url, title, template)
+
+        self._create_project(dialog, parent, setup, "Created", "Could not create project")
+
+    def import_project(self) -> None:
+        parent = self.current_path
+        owners = self._owners()
+        if owners is None:
+            return
+        dialog = ImportProjectDialog(owners, self.config.default_owner, self.config.default_private, format_path(parent), self)
+        if not dialog.exec():
+            return
+        title, source = dialog.name.text().strip(), dialog.source_path()
+
+        def setup(project: Project, url: str) -> None:
+            self.workspace.import_local(project, url, title, source)
+
+        self._create_project(dialog, parent, setup, "Imported", "Could not import project")
+
+    def _create_project(
+        self,
+        dialog: NewProjectDialog,
+        parent: FolderPath,
+        setup: Callable[[Project, str], None],
+        verb: str,
+        error_title: str,
+    ) -> None:
+        """Create the repository, fill it with ``setup`` and add it to the project list."""
         title = dialog.name.text().strip()
         owner, repo_name = dialog.owner.currentText(), dialog.repo.text().strip()
         project = Project(name=title, repo=f"{owner}/{repo_name}", description=dialog.description.text().strip())
@@ -988,20 +1042,14 @@ class MainWindow(QMainWindow):
         def work():
             info = self.forge.create_repo(owner, repo_name, project.description, private)
             self.repo_info[project.repo.casefold()] = info
-            with tempfile.TemporaryDirectory() as tmp:
-                template = None
-                with self.config_repo.lock:
-                    if self.config_repo.template_dir.is_dir():
-                        template = Path(tmp) / "template"
-                        shutil.copytree(self.config_repo.template_dir, template)
-                self.workspace.create(project, self.clone_url(project.repo), title, template)
+            setup(project, self.clone_url(project.repo))
             config = self.config_repo.mutate(lambda c, _r: c.add_project(parent, project), f"Add project {title}")
             return self._render_and_publish([project]) or config
 
         def done(config: Config):
             self._apply_config(config)
             self._refresh_meta([project.id], fetch=False)
-            self.notify(f"Created {title}")
+            self.notify(f"{verb} {title}")
             if open_after:
                 self.open_project(project.id)
 
@@ -1009,10 +1057,78 @@ class MainWindow(QMainWindow):
             extra = ""
             if project.repo.casefold() in self.repo_info:
                 extra = f"\n\nThe repository {project.repo} was created on the server. You can add it with 'Add Existing'."
-            QMessageBox.warning(self, "Could not create project", f"{error}{extra}")
+            QMessageBox.warning(self, error_title, f"{error}{extra}")
             self.refresh()
 
-        self.runner.run(work, done, failed, label=f"Creating {title}…")
+        self.runner.run(work, done, failed, label=f"{'Creating' if verb == 'Created' else 'Importing'} {title}…")
+
+    def revert_project(self, pid: str) -> None:
+        project = self._projects[pid][1]
+        if not self.workspace.is_cloned(project):
+            QMessageBox.information(self, project.name, "This project is not downloaded yet, so there is nothing to revert.")
+            return
+        changed = self.workspace.changed_files(project)
+        meta = self.meta.get(pid)
+        ahead = meta.state.ahead if meta and meta.state else 0
+        if not changed and not ahead:
+            QMessageBox.information(self, project.name, "There are no local changes - your copy already matches the server.")
+            return
+        details = []
+        if changed:
+            shown = "\n".join(f"  • {f}" for f in changed[:15])
+            more = f"\n  … and {len(changed) - 15} more" if len(changed) > 15 else ""
+            details.append(f"{_plural(len(changed), 'changed file')}:\n{shown}{more}")
+        if ahead:
+            details.append(f"{_plural(ahead, 'saved change')} that never reached the server.")
+        if self.workspace.open_lock_files(project):
+            details.append("The project seems to be open in KiCad. Close it first, or KiCad may write your changes back.")
+        box = QMessageBox(
+            QMessageBox.Icon.Warning,
+            "Revert to server state",
+            f"Throw away all local changes to '{project.name}' and go back to the version on the server?\n\n"
+            + "\n\n".join(details)
+            + "\n\nThis cannot be undone.",
+            parent=self,
+        )
+        revert = box.addButton("Discard My Changes", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not revert:
+            return
+
+        def work():
+            self.workspace.set_url(project, self.clone_url(project.repo))
+            return self.workspace.revert(project)
+
+        self._project_task(pid, "Reverting…", work, lambda msg: self.notify(f"{project.name}: {msg}"), "Could not revert")
+
+    def convert_to_template(self, pid: str) -> None:
+        project = self._projects[pid][1]
+        name, ok = QInputDialog.getText(
+            self,
+            "Convert to template",
+            "Name of the new template.\nIt is made from the version on the server and offered under 'New Project':",
+            text=project.name,
+        )
+        if not ok or not name.strip():
+            return
+        try:
+            name = check_template_name(name)
+        except ConfigError as e:
+            self.show_error(e, "Not possible")
+            return
+
+        def work():
+            with tempfile.TemporaryDirectory(prefix="kpm-template-") as tmp:
+                source = Path(tmp) / "src"
+                self.git.run("clone", "-q", "--depth", "1", self.clone_url(project.repo), str(source))
+                return self.config_repo.mutate(lambda _c, r: r.add_template(name, source), f"Add template {name}")
+
+        def done(config: Config):
+            self._apply_config(config)
+            self.notify(f"Template '{name}' created from {project.name}")
+
+        self._project_task(pid, "Creating template…", work, done, "Could not create template")
 
     def add_existing(self) -> None:
         parent = self.current_path
@@ -1066,6 +1182,7 @@ class MainWindow(QMainWindow):
         if item is None:
             menu.addAction(self.act_new_project)
             menu.addAction(self.act_add_existing)
+            menu.addAction(self.act_import)
             menu.addAction(self.act_new_folder)
         else:
             kind, key = self.grid.item_key(item)
@@ -1082,10 +1199,12 @@ class MainWindow(QMainWindow):
                 open_action.setFont(font)
                 menu.addAction("Get Latest", lambda: self.get_latest(key))
                 menu.addAction("Save to Server…", lambda: self.save_project(key))
+                menu.addAction("Revert to Server State…", lambda: self.revert_project(key))
                 menu.addSeparator()
                 menu.addAction("Update Preview", lambda: self.update_preview(key))
                 menu.addAction("Show Files", lambda: self.show_files(key))
                 menu.addAction(f"Open on {self.forge.label.split(' ')[0]}", lambda: self.open_on_server(key))
+                menu.addAction("Convert to Template…", lambda: self.convert_to_template(key))
                 menu.addSeparator()
                 menu.addAction("Rename…", lambda: self.rename_project(key))
                 menu.addAction("Remove from List…", lambda: self.remove_project(key))
