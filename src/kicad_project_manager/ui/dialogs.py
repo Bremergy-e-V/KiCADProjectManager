@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -46,6 +47,18 @@ class _WaitCursor:
 
     def __exit__(self, *exc):
         QGuiApplication.restoreOverrideCursor()
+
+
+def default_owner_combo(organizations: list[str], current: str = "") -> QComboBox:
+    """Choice of the organization new projects are created in by default, or none."""
+    combo = QComboBox()
+    combo.addItem("No default - choose each time", "")
+    for org in organizations:
+        combo.addItem(org, org)
+    if current and combo.findData(current) < 0:
+        combo.addItem(current, current)
+    combo.setCurrentIndex(max(0, combo.findData(current)))
+    return combo
 
 
 def _error_label() -> QLabel:
@@ -313,17 +326,15 @@ class InitConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Set up project list")
         self.name = QLineEdit("PCB Projects")
-        self.owner = QComboBox()
-        self.owner.addItems(owners)
-        if len(owners) > 1:
-            self.owner.setCurrentIndex(1)  # first organization rather than the personal account
+        self.owner = default_owner_combo(owners[1:])  # organizations only, not the personal account
         self.private = QCheckBox("New projects are private by default")
         self.private.setChecked(True)
         intro = QLabel(f"<b>{repo}</b> does not contain a project list yet. A new one will be created in it.")
         intro.setWordWrap(True)
         form = QFormLayout()
         form.addRow("Name:", self.name)
-        form.addRow("Create new projects in:", self.owner)
+        if len(owners) > 1:
+            form.addRow("Default organization:", self.owner)
         form.addRow("", self.private)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Create project list")
@@ -360,8 +371,13 @@ class NewProjectDialog(QDialog):
         self.repo.setPlaceholderText("Motor_Controller")
         self.owner = QComboBox()
         self.owner.addItems(owners)
+        self.owner.setPlaceholderText("Please choose")
         if default_owner in owners:
             self.owner.setCurrentText(default_owner)
+        elif len(owners) == 1:
+            self.owner.setCurrentIndex(0)
+        else:
+            self.owner.setCurrentIndex(-1)
         self.description = QLineEdit()
         self.private = QCheckBox("Private (only members can see it)")
         self.private.setChecked(default_private)
@@ -403,6 +419,8 @@ class NewProjectDialog(QDialog):
             self.error.setText(problem)
         elif not self.name.text().strip():
             self.error.setText("Please enter a project name.")
+        elif self.owner.currentIndex() < 0:
+            self.error.setText("Please choose where to create the repository.")
         elif not REPO_NAME_RE.match(self.repo.text().strip()) or self.repo.text().strip().endswith(".git"):
             self.error.setText("The repository name may only contain letters, digits, '-', '_' and '.'.")
         else:
@@ -517,7 +535,7 @@ class SaveDialog(QDialog):
 class SettingsDialog(QDialog):
     CHANGE_ACCOUNT, CHANGE_CONFIG, CHECK_UPDATES = 2, 3, 4
 
-    def __init__(self, settings: Settings, parent=None):
+    def __init__(self, settings: Settings, organizations: list[str] | None = None, default_owner: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(560)
@@ -537,6 +555,17 @@ class SettingsDialog(QDialog):
         form.addRow("KiCad:", self._with_browse(self.kicad))
         form.addRow("kicad-cli:", self._with_browse(self.kicad_cli))
         form.addRow("Download via:", self.protocol)
+
+        # Only offered when the server has organizations; stored in the shared project list.
+        self.default_owner = default_owner_combo(organizations or [], default_owner) if organizations else None
+        project_config = QGroupBox("Project config")
+        if self.default_owner is not None:
+            project_form = QFormLayout(project_config)
+            project_form.addRow("Default organization:", self.default_owner)
+            hint = QLabel("New projects are created in this organization unless you choose another one. Applies to everyone using this project list.")
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color: palette(placeholder-text);")
+            project_form.addRow(hint)
 
         account = QLabel(
             f"Signed in to <b>{settings.server_url}</b> as <b>{settings.username}</b><br>"
@@ -568,6 +597,9 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        if self.default_owner is not None:
+            layout.addSpacing(12)
+            layout.addWidget(project_config)
         layout.addSpacing(12)
         layout.addWidget(account)
         layout.addLayout(row)

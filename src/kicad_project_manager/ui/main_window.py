@@ -157,7 +157,7 @@ class MainWindow(QMainWindow):
         )
         self.act_import = action(
             "Import Local",
-            self._icon("document-import", sp.SP_DialogOpenButton),
+            self._icon("computer", sp.SP_ComputerIcon),
             lambda: self.import_project(),
             tip="Upload a KiCad project from your computer to the server",
         )
@@ -167,8 +167,9 @@ class MainWindow(QMainWindow):
         self.act_refresh = action(
             "Refresh", self._icon("view-refresh", sp.SP_BrowserReload), lambda: self.refresh(visible=True), QKeySequence.StandardKey.Refresh
         )
-        self.act_settings = action("Settings", self._icon("preferences-system", sp.SP_FileDialogDetailedView), lambda: self.open_settings())
-        for a in (self.act_new_project, self.act_add_existing, self.act_import, self.act_new_folder):
+        settings_icon = QIcon.fromTheme("preferences-system", self._icon("document-properties", sp.SP_FileDialogDetailedView))
+        self.act_settings = action("Settings", settings_icon, lambda: self.open_settings())
+        for a in (self.act_add_existing, self.act_new_project, self.act_import, self.act_new_folder):
             toolbar.addAction(a)
         toolbar.addSeparator()
         toolbar.addAction(self.act_refresh)
@@ -392,7 +393,7 @@ class MainWindow(QMainWindow):
         config = Config(
             name=dialog.name.text().strip() or "PCB Projects",
             server_url=self.settings.server_url,
-            default_owner=dialog.owner.currentText(),
+            default_owner=dialog.owner.currentData(),
             default_private=dialog.private.isChecked(),
         )
         self.runner.run(
@@ -1180,8 +1181,8 @@ class MainWindow(QMainWindow):
         item = self.grid.itemAt(pos)
         menu = QMenu(self)
         if item is None:
-            menu.addAction(self.act_new_project)
             menu.addAction(self.act_add_existing)
+            menu.addAction(self.act_new_project)
             menu.addAction(self.act_import)
             menu.addAction(self.act_new_folder)
         else:
@@ -1224,7 +1225,15 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         old = (self.settings.workspace, self.settings.clone_protocol)
-        dialog = SettingsDialog(self.settings, self)
+        organizations, default_owner = [], ""
+        if self.config is not None:
+            default_owner = self.config.default_owner
+            try:
+                with _WaitCursor():
+                    organizations = self.forge.owners()[1:]
+            except ForgeError:
+                pass  # offline - the project config section is simply not shown
+        dialog = SettingsDialog(self.settings, organizations, default_owner, self)
         result = dialog.exec()
         if result == SettingsDialog.CHANGE_ACCOUNT:
             if self._ensure_account(force_dialog=True):
@@ -1236,6 +1245,12 @@ class MainWindow(QMainWindow):
             return
         if result:
             self.settings.save()
+            new_owner = dialog.default_owner.currentData() if dialog.default_owner is not None else default_owner
+            if self.config is not None and new_owner != default_owner:
+                self._mutate(
+                    lambda c, _r: setattr(c, "default_owner", new_owner),
+                    f"Set default organization to {new_owner}" if new_owner else "Clear default organization",
+                )
             if (self.settings.workspace, self.settings.clone_protocol) != old:
                 self.workspace = Workspace(self.git, Path(self.settings.workspace).expanduser())
                 self._refresh_meta(fetch=False)
