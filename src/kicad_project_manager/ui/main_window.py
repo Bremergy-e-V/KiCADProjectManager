@@ -190,9 +190,8 @@ class MainWindow(QMainWindow):
         self.tree.items_dropped.connect(self._move_items)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
 
-        folder_pixmap = self.folder_icon.pixmap(QSize(72, 72), self.devicePixelRatioF())
         self.grid = ProjectGrid()
-        self.grid.setItemDelegate(CardDelegate(self._card_info, folder_pixmap, self.grid))
+        self.grid.setItemDelegate(CardDelegate(self._card_info, self._folder_pixmap(), self.grid))
         self.grid.itemActivated.connect(self._grid_activated)
         self.grid.items_dropped.connect(self._move_items)
         self.grid.customContextMenuRequested.connect(self._grid_menu)
@@ -237,6 +236,18 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.progress)
         self.runner.busy_changed.connect(self._busy_changed)
         self._set_enabled(False)
+        # Follow the system when it switches between light and dark mode while the app runs.
+        QApplication.styleHints().colorSchemeChanged.connect(lambda *_: QTimer.singleShot(0, self._color_scheme_changed))
+
+    def _folder_pixmap(self) -> QPixmap:
+        return self.folder_icon.pixmap(QSize(72, 72), self.devicePixelRatioF())
+
+    def _color_scheme_changed(self) -> None:
+        """Icons are rendered for the current colours, so render them again."""
+        self.grid.itemDelegate().folder_pixmap = self._folder_pixmap()
+        if self.config is not None:
+            self._rebuild_tree()
+        self.grid.viewport().update()
 
     def _set_enabled(self, enabled: bool) -> None:
         for a in (self.act_new_project, self.act_add_existing, self.act_import, self.act_new_folder, self.act_refresh):
@@ -1245,6 +1256,7 @@ class MainWindow(QMainWindow):
             return
         if result:
             self.settings.save()
+            apply_color_scheme(self.settings.color_scheme)
             new_owner = dialog.default_owner.currentData() if dialog.default_owner is not None else default_owner
             if self.config is not None and new_owner != default_owner:
                 self._mutate(
@@ -1341,7 +1353,17 @@ class MainWindow(QMainWindow):
         self.runner.run(work, done, lambda e: self.show_error(e, "Update failed"), label="Downloading update…")
 
 
+def apply_color_scheme(name: str) -> None:
+    """Light or dark mode as chosen in the settings; "system" follows the operating system."""
+    hints = QApplication.styleHints()
+    if not hasattr(hints, "setColorScheme"):  # Qt < 6.8: always follow the system
+        return
+    schemes = {"light": Qt.ColorScheme.Light, "dark": Qt.ColorScheme.Dark}
+    hints.setColorScheme(schemes.get(name, Qt.ColorScheme.Unknown))
+
+
 def run_app(settings: Settings) -> MainWindow:
+    apply_color_scheme(settings.color_scheme)
     window = MainWindow(settings)
     window.show()
     QTimer.singleShot(0, window.start)

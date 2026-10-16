@@ -243,6 +243,8 @@ class CardDelegate(QStyledItemDelegate):
             painter.setPen(QPen(pal.color(QPalette.ColorRole.Highlight), 2))
         elif hovered:
             painter.setPen(QPen(pal.color(QPalette.ColorRole.Highlight).lighter(130) if dark else pal.color(QPalette.ColorRole.Mid), 1.5))
+        elif dark:
+            painter.setPen(QPen(QColor(255, 255, 255, 40), 1))  # Mid is barely visible on dark backgrounds
         else:
             painter.setPen(QPen(pal.color(QPalette.ColorRole.Mid), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)

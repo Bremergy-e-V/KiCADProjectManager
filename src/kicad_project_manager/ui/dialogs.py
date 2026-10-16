@@ -549,12 +549,18 @@ class SettingsDialog(QDialog):
         self.protocol.addItem("HTTPS - uses your access token (recommended)", "https")
         self.protocol.addItem("SSH - uses your SSH key", "ssh")
         self.protocol.setCurrentIndex(max(0, self.protocol.findData(settings.clone_protocol)))
+        self.color_scheme = QComboBox()
+        self.color_scheme.addItem("Same as system", "system")
+        self.color_scheme.addItem("Light", "light")
+        self.color_scheme.addItem("Dark", "dark")
+        self.color_scheme.setCurrentIndex(max(0, self.color_scheme.findData(settings.color_scheme)))
 
         form = QFormLayout()
         form.addRow("Projects folder:", self._with_browse(self.workspace, directory=True))
         form.addRow("KiCad:", self._with_browse(self.kicad))
         form.addRow("kicad-cli:", self._with_browse(self.kicad_cli))
         form.addRow("Download via:", self.protocol)
+        form.addRow("Appearance:", self.color_scheme)
 
         # Only offered when the server has organizations; stored in the shared project list.
         self.default_owner = default_owner_combo(organizations or [], default_owner) if organizations else None
@@ -562,7 +568,9 @@ class SettingsDialog(QDialog):
         if self.default_owner is not None:
             project_form = QFormLayout(project_config)
             project_form.addRow("Default organization:", self.default_owner)
-            hint = QLabel("New projects are created in this organization unless you choose another one. Applies to everyone using this project list.")
+            hint = QLabel(
+                "New projects are created in this organization unless you choose another one. Applies to everyone using this project list."
+            )
             hint.setWordWrap(True)
             hint.setStyleSheet("color: palette(placeholder-text);")
             project_form.addRow(hint)
@@ -636,4 +644,5 @@ class SettingsDialog(QDialog):
         self.settings.kicad_path = self.kicad.text().strip()
         self.settings.kicad_cli_path = self.kicad_cli.text().strip()
         self.settings.clone_protocol = self.protocol.currentData()
+        self.settings.color_scheme = self.color_scheme.currentData()
         self.settings.check_updates = self.check_updates.isChecked()

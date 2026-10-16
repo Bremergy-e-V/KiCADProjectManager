@@ -43,6 +43,7 @@ class Settings:
     kicad_path: str = ""
     kicad_cli_path: str = ""
     check_updates: bool = True
+    color_scheme: str = "system"  # "system", "light" or "dark"
     skipped_build: int = 0  # release build the user chose to skip
 
     @staticmethod
