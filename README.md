@@ -18,7 +18,7 @@ Git runs underneath, but nobody has to set it up or type a git command.
 - **New Project** creates the repository on the server, sets up a KiCad project from one of your team templates (or a blank one) with sensible `.gitignore`/`.gitattributes` files, and adds it to the current folder.
 - **Add Existing** adds any number of existing repositories to the current folder.
 - **Import Local** uploads a KiCad project from your computer: it creates a new repository, copies the project into your projects folder (without backups, lock and autosave files) and adds it to the current folder. The original folder is left untouched.
-- **Convert to Template** (right-click a project) turns the server version of a project into a template that everyone can pick under *New Project*.
+- **Convert to Template** (right-click a project) offers a project as a template that everyone can pick under *New Project*. The project stays a normal project: open it, change it and save it to the server, and new projects start from that version.
 - **Revert to Server State** (right-click a project) throws away all your local changes, including saves that never reached the server, after asking for confirmation.
 - **Save to server** uploads your changes with a short description. If a teammate changed something else in the meantime, the two sets of changes are combined automatically. If you both changed the same thing, nothing is lost: your version goes to a separate branch on the server and you get a clear message (see [Conflicts](#conflicts)).
 - **No git setup needed.** You sign in with a personal access token. The app passes it to git itself, so there are no SSH keys or credential helpers to configure, and the token is never written into a remote URL. The token is kept in the system keychain, and commits are made with your account's name.
@@ -58,9 +58,9 @@ After installing, search for **KiCad Project Manager** in the start menu or your
 All shared state lives in a **config repository** on your server:
 
 ```
-kicad-projects.json      folder structure and project list
+kicad-projects.json      folder structure, project list and templates
 previews/<id>.png        one preview image per project
-templates/<name>/        optional: KiCad projects offered as templates for "New Project"
+templates/<name>/        optional: copies of KiCad projects offered as templates (older versions)
 README.md
 ```
 
@@ -77,7 +77,11 @@ Projects are normal repositories on the same server. They're downloaded to `~/Ki
 
 ## Team templates
 
-Templates are the starting points offered under *New Project*. For example, one could hold your title block, design rules, 4-layer board stackup and library tables. The easiest way to make one is to set up a project the way you want it, then right-click it and choose **Convert to Template**. You can also put a complete KiCad project into a `templates/<name>/` folder of the config repository by hand. A `template/` folder from older versions is still offered as *Team template*.
+Templates are the starting points offered under *New Project*. For example, one could hold your title block, design rules, 4-layer board stackup and library tables. To make one, set up a project the way you want it, then right-click it and choose **Convert to Template**.
+
+A template is a normal project. To change it, open it in KiCad like any other project and click **Save to server**. New projects always start from the newest version on the server, so changes that aren't saved yet are not included. Projects created earlier are not changed. Right-click the project to rename the template or to stop offering it (**Stop Using as Template**).
+
+Older versions saved templates as copies in `templates/<name>/` folders of the config repository, and you can still put a complete KiCad project there by hand. A `template/` folder is still offered as *Team template*. Such a copy can't be edited in the app. To replace it with a project, right-click the project, choose **Convert to Template** and enter the same name.
 
 Files named like the template's `.kicad_pro` are renamed after the new project. Everything else is copied as is.
 

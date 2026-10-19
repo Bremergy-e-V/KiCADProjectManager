@@ -116,6 +116,7 @@ class Config:
     default_owner: str = ""
     default_private: bool = True
     root: Folder = field(default_factory=lambda: Folder(""))
+    templates: dict[str, str] = field(default_factory=dict)  # template name -> repo of the project it is made from
 
     # -- serialization -------------------------------------------------------
 
@@ -128,6 +129,7 @@ class Config:
             "default_private": self.default_private,
             "folders": self.root.to_dict()["folders"],
             "projects": self.root.to_dict()["projects"],
+            "templates": dict(sorted(self.templates.items(), key=lambda item: item[0].casefold())),
         }
 
     @classmethod
@@ -140,6 +142,7 @@ class Config:
             default_owner=d.get("default_owner", ""),
             default_private=d.get("default_private", True),
             root=Folder.from_dict({"name": "", "folders": d.get("folders", []), "projects": d.get("projects", [])}),
+            templates=dict(d.get("templates", {})),
         )
 
     # -- lookup --------------------------------------------------------------
@@ -244,14 +247,38 @@ class Config:
         self.folder(path).projects.remove(project)
         return project
 
+    # -- templates -----------------------------------------------------------
+    #
+    # A template is a normal project. New projects start from its newest server version,
+    # so it is edited like any other project.
+
+    def find_template(self, name: str) -> str | None:
+        """The name of the template called ``name``, ignoring case."""
+        return next((n for n in self.templates if n.casefold() == name.strip().casefold()), None)
+
+    def template_of(self, repo: str) -> str | None:
+        """The name of the template made from the project in ``repo``, if any."""
+        return next((n for n, r in self.templates.items() if r.casefold() == repo.casefold()), None)
+
+    def set_template(self, name: str, repo: str) -> str:
+        """Offer the project in ``repo`` as template ``name``, replacing a template of that name."""
+        name = check_template_name(name)
+        for other in [n for n, r in self.templates.items() if n.casefold() == name.casefold() or r.casefold() == repo.casefold()]:
+            del self.templates[other]
+        self.templates[name] = repo
+        return name
+
+    def remove_template(self, name: str) -> None:
+        self.templates.pop(name, None)
+
 
 README_TEXT = """# {name}
 
 This repository is managed by **KiCad Project Manager**.
 
-* `{config}` - folder structure and project list
+* `{config}` - folder structure, project list and templates
 * `{previews}/` - preview images (one PNG per project id)
-* `{templates}/<name>/` - optional: KiCad projects offered as templates for new projects
+* `{templates}/<name>/` - optional: copies of KiCad projects offered as templates for new projects
 
 Please edit it through the app rather than by hand.
 """
@@ -275,8 +302,11 @@ class ConfigRepo:
     def templates_dir(self) -> Path:
         return self.path / TEMPLATES_DIR
 
-    def templates(self) -> dict[str, Path]:
-        """Project templates by name, sorted. Each one is a folder holding a KiCad project."""
+    def template_folders(self) -> dict[str, Path]:
+        """Templates stored as a copy in the config repository, by name, sorted. Each one is a folder holding a KiCad project.
+
+        Older versions made templates this way; now they are normally projects (see :attr:`Config.templates`).
+        """
         with self.lock:
             found: dict[str, Path] = {}
             if self.templates_dir.is_dir():
@@ -288,16 +318,15 @@ class ConfigRepo:
                 found[LEGACY_TEMPLATE_NAME] = legacy
             return dict(sorted(found.items(), key=lambda item: item[0].casefold()))
 
-    def add_template(self, name: str, source: Path) -> None:
-        """Copy the KiCad project in ``source`` to ``templates/<name>``. Use inside :meth:`mutate`."""
-        name = check_template_name(name)
-        if name.casefold() in {n.casefold() for n in self.templates()}:
-            raise ConfigError(f"A template named '{name}' already exists.")
-        if not any(source.glob("*.kicad_pro")):
-            raise ConfigError("This project contains no KiCad project (.kicad_pro) file.")
-        target = self.templates_dir / name
-        shutil.copytree(source, target, ignore=shutil.ignore_patterns(".git"))
-        (target / "README.md").unlink(missing_ok=True)  # each new project gets its own README
+    def find_template_folder(self, name: str) -> str | None:
+        """The name of the template folder called ``name``, ignoring case."""
+        return next((n for n in self.template_folders() if n.casefold() == name.strip().casefold()), None)
+
+    def remove_template_folder(self, name: str) -> None:
+        """Delete the template folder called ``name`` (ignoring case), if any. Use inside :meth:`mutate`."""
+        existing = self.find_template_folder(name)
+        if existing is not None:
+            shutil.rmtree(self.template_folders()[existing])
 
     def preview_file(self, project_id: str) -> Path:
         return self.path / PREVIEW_DIR / f"{project_id}.png"

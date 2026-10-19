@@ -111,28 +111,49 @@ def test_preview_files_committed(git, make_bare, tmp_path):
     assert other.preview_file("abc").read_bytes() == b"png"
 
 
-def test_templates_added_and_listed(git, make_bare, tmp_path):
+def test_project_templates():
+    c = sample()
+    assert c.set_template(" 2-Layer ", "PCB_Engineering/motor") == "2-Layer"
+    assert c.template_of("pcb_engineering/MOTOR") == "2-Layer"
+    assert c.find_template("2-layer") == "2-Layer"
+    c.set_template("Motor base", "PCB_Engineering/motor")  # renames: a project is at most one template
+    assert c.templates == {"Motor base": "PCB_Engineering/motor"}
+    c.set_template("motor BASE", "PCB_Engineering/jig")  # replaces the template of that name
+    assert c.templates == {"motor BASE": "PCB_Engineering/jig"}
+    assert c.template_of("PCB_Engineering/motor") is None
+    for bad in ("a:b", ".hidden", ""):
+        with pytest.raises(ConfigError):
+            c.set_template(bad, "PCB_Engineering/motor")
+    again = Config.from_dict(json.loads(json.dumps(c.to_dict())))
+    assert again.templates == c.templates
+    c.remove_template("motor BASE")
+    assert c.templates == {}
+
+
+def test_template_folders_listed_and_replaced(git, make_bare, tmp_path):
     url = make_bare("config")
     repo = ConfigRepo(git, tmp_path / "c", url)
     repo.open()
     repo.initialize(Config(name="PCBs"))
-    source = tmp_path / "src"
-    source.mkdir()
-    (source / "Board.kicad_pro").write_text("{}")
-    (source / "README.md").write_text("# Board")
-    (source / ".git").mkdir()
-    repo.mutate(lambda _c, r: r.add_template("4-Layer", source), "template")
-    with pytest.raises(ConfigError):
-        repo.mutate(lambda _c, r: r.add_template("4-layer", source), "duplicate")
-    for bad in ("a:b", ".hidden", ""):
-        with pytest.raises(ConfigError):
-            repo.add_template(bad, source)
 
+    def add_folder(_c, r: ConfigRepo):
+        (r.templates_dir / "4-Layer").mkdir(parents=True)
+        (r.templates_dir / "4-Layer" / "Board.kicad_pro").write_text("{}")
+
+    repo.mutate(add_folder, "template folder")
     other = ConfigRepo(git, tmp_path / "other", url)
     other.open()
-    templates = other.templates()
-    assert list(templates) == ["4-Layer"]
-    assert {p.name for p in templates["4-Layer"].iterdir()} == {"Board.kicad_pro"}
+    assert list(other.template_folders()) == ["4-Layer"]
+    assert other.find_template_folder("4-layer") == "4-Layer"
+
+    def replace(c: Config, r: ConfigRepo):
+        c.set_template("4-layer", "PCB_Engineering/four-layer")
+        r.remove_template_folder("4-layer")
+
+    other.mutate(replace, "replace")
+    repo.sync()
+    assert repo.template_folders() == {}
+    assert repo.load().templates == {"4-layer": "PCB_Engineering/four-layer"}
 
 
 def test_legacy_template_folder_still_offered(git, make_bare, tmp_path):
@@ -141,4 +162,4 @@ def test_legacy_template_folder_still_offered(git, make_bare, tmp_path):
     repo.initialize(Config(name="PCBs"))
     (repo.path / "template").mkdir()
     (repo.path / "template" / "T.kicad_pro").write_text("{}")
-    assert list(repo.templates()) == ["Team template"]
+    assert list(repo.template_folders()) == ["Team template"]
