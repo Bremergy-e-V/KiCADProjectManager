@@ -510,6 +510,9 @@ class MainWindow(QMainWindow):
                 self.grid.add_card("folder", (*self.current_path, sub.name), sub.name)
             for p in sorted(folder.projects, key=lambda p: p.name.casefold()):
                 tooltip = p.repo + (f"\n{p.description}" if p.description else "")
+                template = self.config.template_of(p.repo)
+                if template is not None:
+                    tooltip += f"\nTemplate '{template}': new projects start from the version on the server"
                 self.grid.add_card("project", p.id, p.name, tooltip)
             self._update_breadcrumb()
             hint = "This folder is empty.\n\nCreate a new project or folder, add existing projects, or drag projects here."
@@ -761,12 +764,14 @@ class MainWindow(QMainWindow):
 
     def remove_project(self, pid: str) -> None:
         project = self._projects[pid][1]
+        template = self.config.template_of(project.repo)
+        note = f"\n\nIt stays available as the template '{template}'." if template is not None else ""
         answer = QMessageBox.question(
             self,
             "Remove from list",
             f"Remove '{project.name}' from the project list?\n\n"
             "The repository on the server and your local copy are not deleted. "
-            "You can add it again with 'Add Existing'.",
+            f"You can add it again with 'Add Existing'.{note}",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -1001,7 +1006,9 @@ class MainWindow(QMainWindow):
         owners = self._owners()
         if owners is None:
             return
-        templates = list(self.config_repo.templates())
+        linked = dict(self.config.templates)
+        folders = [n for n in self.config_repo.template_folders() if self.config.find_template(n) is None]
+        templates = sorted([*linked, *folders], key=str.casefold)
         dialog = NewProjectDialog(owners, self.config.default_owner, self.config.default_private, format_path(parent), templates, self)
         if not dialog.exec():
             return
@@ -1011,13 +1018,25 @@ class MainWindow(QMainWindow):
         def setup(project: Project, url: str) -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 template = None
-                with self.config_repo.lock:
-                    source = self.config_repo.templates().get(template_name) if template_name else None
-                    if source is not None:
-                        template = Path(tmp) / "template"
-                        shutil.copytree(source, template)
-                if template_name and template is None:
-                    raise WorkspaceError(f"The template '{template_name}' no longer exists. Someone may have removed it.")
+                if template_name in linked:
+                    template = Path(tmp) / "template"
+                    try:
+                        self.git.run("clone", "-q", "--depth", "1", self.clone_url(linked[template_name]), str(template))
+                    except GitError as e:
+                        raise WorkspaceError(f"Could not download the template '{template_name}' ({linked[template_name]}):\n{e}") from None
+                    if not any(template.glob("*.kicad_pro")):
+                        raise WorkspaceError(
+                            f"The template '{template_name}' ({linked[template_name]}) contains no KiCad project (.kicad_pro) file."
+                        )
+                    (template / "README.md").unlink(missing_ok=True)  # each new project gets its own README
+                elif template_name:
+                    with self.config_repo.lock:
+                        source = self.config_repo.template_folders().get(template_name)
+                        if source is not None:
+                            template = Path(tmp) / "template"
+                            shutil.copytree(source, template)
+                    if template is None:
+                        raise WorkspaceError(f"The template '{template_name}' no longer exists. Someone may have removed it.")
                 self.workspace.create(project, url, title, template)
 
         self._create_project(dialog, parent, setup, "Created", "Could not create project")
@@ -1115,12 +1134,16 @@ class MainWindow(QMainWindow):
         self._project_task(pid, "Reverting…", work, lambda msg: self.notify(f"{project.name}: {msg}"), "Could not revert")
 
     def convert_to_template(self, pid: str) -> None:
+        """Offer a project as a template under 'New Project', or rename the template it already is."""
         project = self._projects[pid][1]
+        current = self.config.template_of(project.repo)
         name, ok = QInputDialog.getText(
             self,
-            "Convert to template",
-            "Name of the new template.\nIt is made from the version on the server and offered under 'New Project':",
-            text=project.name,
+            "Rename template" if current else "Convert to template",
+            "Name of the template offered under 'New Project'.\n"
+            "New projects start from the version of this project on the server,\n"
+            "so you can keep editing it like any other project:",
+            text=current or project.name,
         )
         if not ok or not name.strip():
             return
@@ -1129,18 +1152,36 @@ class MainWindow(QMainWindow):
         except ConfigError as e:
             self.show_error(e, "Not possible")
             return
+        other = self.config.find_template(name)
+        if other is not None and self.config.templates[other].casefold() == project.repo.casefold():
+            other = None
+        other = other or self.config_repo.find_template_folder(name)
+        if other is not None:
+            answer = QMessageBox.question(
+                self,
+                "Replace template",
+                f"There already is a template named '{other}'. Replace it with '{project.name}'?\n\n"
+                "Projects created from the old template are not changed.",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
 
-        def work():
-            with tempfile.TemporaryDirectory(prefix="kpm-template-") as tmp:
-                source = Path(tmp) / "src"
-                self.git.run("clone", "-q", "--depth", "1", self.clone_url(project.repo), str(source))
-                return self.config_repo.mutate(lambda _c, r: r.add_template(name, source), f"Add template {name}")
+        def change(c: Config, repo: ConfigRepo | None):
+            c.set_template(name, project.repo)
+            if repo is not None:
+                repo.remove_template_folder(name)
 
-        def done(config: Config):
-            self._apply_config(config)
-            self.notify(f"Template '{name}' created from {project.name}")
+        def done(_config: Config):
+            self.notify(f"'{project.name}' is now offered as the template '{name}' under New Project")
 
-        self._project_task(pid, "Creating template…", work, done, "Could not create template")
+        self._mutate(change, f"Rename template {current} to {name}" if current else f"Add template {name}", done)
+
+    def stop_template(self, pid: str) -> None:
+        project = self._projects[pid][1]
+        name = self.config.template_of(project.repo)
+        if name is None:
+            return
+        self._mutate(lambda c, _r: c.remove_template(name), f"Remove template {name}", lambda _c: self.notify(f"Template '{name}' removed"))
 
     def add_existing(self) -> None:
         parent = self.current_path
@@ -1216,7 +1257,11 @@ class MainWindow(QMainWindow):
                 menu.addAction("Update Preview", lambda: self.update_preview(key))
                 menu.addAction("Show Files", lambda: self.show_files(key))
                 menu.addAction(f"Open on {self.forge.label.split(' ')[0]}", lambda: self.open_on_server(key))
-                menu.addAction("Convert to Template…", lambda: self.convert_to_template(key))
+                if self.config.template_of(self._projects[key][1].repo) is None:
+                    menu.addAction("Convert to Template…", lambda: self.convert_to_template(key))
+                else:
+                    menu.addAction("Rename Template…", lambda: self.convert_to_template(key))
+                    menu.addAction("Stop Using as Template", lambda: self.stop_template(key))
                 menu.addSeparator()
                 menu.addAction("Rename…", lambda: self.rename_project(key))
                 menu.addAction("Remove from List…", lambda: self.remove_project(key))
