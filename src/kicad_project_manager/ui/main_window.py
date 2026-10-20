@@ -1354,11 +1354,10 @@ class MainWindow(QMainWindow):
         box.setWindowTitle("Update available")
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setText(f"<b>A new version of {APP_NAME} is available.</b>")
-        how = (
-            "The app closes, installs the update and starts again."
-            if kind is updater.InstallKind.WINDOWS_INSTALLER
-            else "You will be asked for your password to install it."
-        )
+        how = {
+            updater.InstallKind.WINDOWS_INSTALLER: "The app closes, installs the update and starts again.",
+            updater.InstallKind.APPIMAGE: "It replaces this AppImage, then the app starts again.",
+        }.get(kind, "You will be asked for your password to install it.")
         link = f" <a href='{release.release_url}'>What's new?</a>" if release.release_url else ""
         box.setInformativeText(
             f"You have build {updater.current_build()}, the new one is build {release.build} "
@@ -1384,7 +1383,7 @@ class MainWindow(QMainWindow):
             if kind is updater.InstallKind.WINDOWS_INSTALLER:
                 QApplication.quit()  # the installer waits for us, then restarts the app
                 return
-            command = updater.restart_command()
+            command = updater.restart_command(kind)
             if (
                 command
                 and QMessageBox.question(self, "Update installed", "The update is installed. Restart now?")

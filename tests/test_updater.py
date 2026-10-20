@@ -20,6 +20,7 @@ def manifest(**overrides) -> bytes:
         "releaseUrl": "https://example/releases/tag/latest",
         "windows": {"name": "setup.exe", "url": "https://example/setup.exe", "sha256": SHA, "size": 10},
         "archlinux": {"name": "pkg.tar.zst", "url": "https://example/pkg.tar.zst", "sha256": SHA.upper(), "size": 20},
+        "appimage": {"name": "app.AppImage", "url": "https://example/app.AppImage", "sha256": SHA, "size": 30},
     }
     d.update(overrides)
     return json.dumps(d).encode()
@@ -30,6 +31,7 @@ def test_parse_manifest():
     assert release.build == 12
     assert release.asset_for(InstallKind.WINDOWS_INSTALLER).size == 10
     assert release.asset_for(InstallKind.ARCH_PACKAGE).sha256 == SHA  # normalized to lower case
+    assert release.asset_for(InstallKind.APPIMAGE).size == 30
     assert release.asset_for(InstallKind.OTHER) is None
 
 
@@ -86,3 +88,29 @@ def test_fetch_release(file_server):
     folder, url = file_server
     (folder / "version.json").write_bytes(manifest(build=99))
     assert updater.fetch_release(f"{url}/version.json").build == 99
+
+
+def test_appimage_detected_and_restarted(monkeypatch, tmp_path):
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
+    monkeypatch.setenv("APPIMAGE", str(tmp_path / "KPM.AppImage"))
+    assert updater.install_kind() is InstallKind.APPIMAGE
+    assert updater.restart_command(InstallKind.APPIMAGE) == [str(tmp_path / "KPM.AppImage")]
+    monkeypatch.delattr(updater.sys, "frozen")
+    assert updater.install_kind() is not InstallKind.APPIMAGE  # a source checkout started from an AppImage's terminal
+
+
+def test_appimage_replaced(tmp_path):
+    target = tmp_path / "KPM.AppImage"
+    target.write_bytes(b"old")
+    target.chmod(0o700)
+    new = tmp_path / "download" / "KPM.AppImage"
+    new.parent.mkdir()
+    new.write_bytes(b"new")
+    updater.replace_appimage(new, target)
+    assert target.read_bytes() == b"new"
+    assert target.stat().st_mode & 0o777 == 0o711
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+    with pytest.raises(UpdateError):
+        updater.replace_appimage(new, tmp_path / "missing" / "KPM.AppImage")

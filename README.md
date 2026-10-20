@@ -33,6 +33,7 @@ Download the newest build from the [releases page](https://github.com/Bremergy-e
 | Windows 10/11 | `KiCadProjectManager-windows-x64-setup.exe` | Installs for the current user, no admin rights needed. |
 | Windows (portable) | `KiCadProjectManager-windows-x64.zip` | Unzip and run `KiCadProjectManager.exe`. Does not update itself. |
 | Arch Linux | `kicad-project-manager-*.pkg.tar.zst` | `sudo pacman -U kicad-project-manager-*.pkg.tar.zst` |
+| Linux Mint 21+, Ubuntu 22.04+, Debian 12+, Fedora, other x86-64 Linux | `KiCadProjectManager-x86_64.AppImage` | Make it executable and run it, see below. |
 
 You also need:
 
@@ -40,6 +41,8 @@ You also need:
 - [KiCad](https://www.kicad.org/download/) 8 or newer, including `kicad-cli` for previews
 
 After installing, search for **KiCad Project Manager** in the start menu or your application launcher.
+
+**AppImage (Linux Mint and others):** put the file where it should stay, e.g. in `~/Applications`, and make it executable. In the file manager, right-click it, choose *Properties → Permissions* and tick *Allow executing file as program*. In a terminal, run `chmod +x KiCadProjectManager-x86_64.AppImage`. Then double-click it. On the first start it adds itself to the start menu. If you move the file later, start it once from its new place to update the menu entry. On Linux Mint you also need `sudo apt install git`.
 
 ## First start
 
@@ -97,12 +100,13 @@ Nothing is ever silently overwritten.
 
 ## Releases and updates
 
-Every push to `main` builds the Windows installer, the portable zip and the Arch package. It then republishes them as the rolling [`latest`](https://github.com/Bremergy-e-V/KiCADProjectManager/releases/tag/latest) release (see `.github/workflows/release.yml`).
+Every push to `main` builds the Windows installer, the portable zip, the Arch package and the AppImage. It then republishes them as the rolling [`latest`](https://github.com/Bremergy-e-V/KiCADProjectManager/releases/tag/latest) release (see `.github/workflows/release.yml`).
 
 The release also contains a `version.json` with the build number and the SHA-256 of each download. The app compares the build number against its own, and only installs a download whose checksum matches:
 
 - **Windows:** the installer runs silently and the app restarts.
 - **Arch Linux:** the package is installed with `pkexec pacman -U`, which asks for your password.
+- **AppImage:** the AppImage file replaces itself and the app restarts. No password is needed, but the folder holding it must be writable.
 
 A copy you run from source has build number 0 and never offers updates. The same goes for the portable zip.
 
@@ -118,6 +122,8 @@ uvx ruff check src tests
 Set `KPM_DEBUG=1` for debug logging.
 
 To make a source checkout show up in the application launcher on Linux, run `./packaging/linux/install-user.sh`.
+
+To build the AppImage locally, install [appimagetool](https://github.com/AppImage/appimagetool) and run `./packaging/linux/build-appimage.sh out/KiCadProjectManager-x86_64.AppImage`. It runs on the glibc of the machine it was built on and newer.
 
 ## License
 
