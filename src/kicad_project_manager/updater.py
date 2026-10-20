@@ -16,6 +16,8 @@ Only copies installed by a release can update:
   program). The new installer is run silently and restarts the app.
 * Arch Linux: installed as a pacman package. The new package is installed with
   ``pkexec pacman -U``, which asks for the user's password.
+* AppImage (any other Linux): the AppImage file replaces itself, no password
+  needed. The AppImage runtime tells us where the file is (``$APPIMAGE``).
 
 Every download is checked against the size and SHA-256 published in the
 manifest before it is run.
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -49,6 +52,7 @@ class UpdateError(Exception):
 class InstallKind(Enum):
     WINDOWS_INSTALLER = "windows"
     ARCH_PACKAGE = "archlinux"
+    APPIMAGE = "appimage"
     OTHER = "other"
 
 
@@ -76,6 +80,8 @@ def install_kind() -> InstallKind:
     if sys.platform == "win32" and getattr(sys, "frozen", False):
         if any(Path(sys.executable).parent.glob("unins*.exe")):
             return InstallKind.WINDOWS_INSTALLER
+    elif sys.platform.startswith("linux") and getattr(sys, "frozen", False) and os.environ.get("APPIMAGE"):
+        return InstallKind.APPIMAGE
     elif sys.platform.startswith("linux") and shutil.which("pacman"):
         if Path(__file__).resolve().is_relative_to("/usr/lib"):
             return InstallKind.ARCH_PACKAGE
@@ -98,7 +104,7 @@ def parse_manifest(data: bytes) -> Release:
     try:
         d = json.loads(data)
         assets = {}
-        for key in ("windows", "archlinux"):
+        for key in ("windows", "archlinux", "appimage"):
             if a := d.get(key):
                 asset = Asset(a["name"], a["url"], a["sha256"].lower(), int(a["size"]))
                 if len(asset.sha256) != 64 or asset.size <= 0:
@@ -155,6 +161,7 @@ def install(path: Path, kind: InstallKind) -> None:
     Windows: starts the installer and returns; the app must quit right away so
     the installer can replace its files (it restarts the app when done).
     Arch Linux: blocks until pacman is done; the app should then restart.
+    AppImage: replaces the AppImage file; the app should then restart.
     """
     if kind is InstallKind.WINDOWS_INSTALLER:
         flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -167,11 +174,29 @@ def install(path: Path, kind: InstallKind) -> None:
             raise UpdateError("The update was cancelled.")
         if proc.returncode != 0:
             raise UpdateError(f"pacman could not install the update:\n\n{(proc.stderr or proc.stdout).strip()}")
+    elif kind is InstallKind.APPIMAGE:
+        replace_appimage(path, Path(os.environ["APPIMAGE"]))
     else:
         raise UpdateError("This copy was not installed from a release, so it cannot update itself.")
 
 
-def restart_command() -> list[str] | None:
-    """Command that starts the freshly installed app (Arch Linux)."""
+def replace_appimage(new: Path, target: Path) -> None:
+    """Swap in the new AppImage. The running app keeps the old file open, so replacing it is safe."""
+    temp = target.with_name(f".{target.name}.update")
+    try:
+        shutil.copyfile(new, temp)
+        temp.chmod(target.stat().st_mode | 0o111)
+        os.replace(temp, target)
+    except OSError as e:
+        temp.unlink(missing_ok=True)
+        raise UpdateError(
+            f"The update could not replace {target}:\n{e}\n\nDownload the new version from the releases page instead."
+        ) from None
+
+
+def restart_command(kind: InstallKind) -> list[str] | None:
+    """Command that starts the freshly installed app (Linux)."""
+    if kind is InstallKind.APPIMAGE:
+        return [os.environ["APPIMAGE"]]
     exe = shutil.which("kicad-project-manager")
     return [exe] if exe else None

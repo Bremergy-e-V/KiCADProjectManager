@@ -3,15 +3,17 @@ name: Release
 # Every push to main republishes the rolling "latest" release. The tag is moved
 # rather than accumulated, so the download URLs never change and the releases
 # page stays at one entry. The in-app updater reads version.json from it.
+# Started by hand on another branch, it builds and tests the downloads without
+# publishing them.
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 # A second push while the first is still building would race on deleting and
-# recreating the same tag, so only one release run is ever in flight.
+# recreating the same tag, so only one release run per branch is ever in flight.
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -98,7 +100,7 @@ jobs:
           --collect-data kicad_project_manager
           --copy-metadata keyring
           --collect-submodules keyring.backends
-          packaging/windows/launcher.py
+          packaging/launcher.py
 
       # Checks the tree that actually ships. A missing platform plugin is the one
       # failure that looks like a healthy process - Qt reports it in a modal box -
@@ -211,11 +213,122 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Other Linux (Linux Mint, Ubuntu, Debian, Fedora, ...): an AppImage. Its
+  # binaries run on the glibc they were built against and newer, so it is built
+  # on the oldest base we support: Ubuntu 22.04, which Linux Mint 21 is based on.
+  # ---------------------------------------------------------------------------
+  appimage:
+    name: Linux AppImage
+    needs: test
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
+    env:
+      APPIMAGETOOL_VERSION: "1.9.1"
+      APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+    steps:
+      # Before checkout: actions/checkout shells out to git when it is present.
+      # The Qt libraries are what PyInstaller resolves the plugins against; xvfb
+      # is for the smoke test.
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends \
+            git ca-certificates curl file binutils xvfb xauth \
+            libegl1 libgl1 libfontconfig1 libdbus-1-3 libglib2.0-0 libgtk-3-0 libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Stamp build number
+        run: |
+          printf 'BUILD = %s\nREPOSITORY = "%s"\n' "${{ github.run_number }}" "${{ github.repository }}" \
+            > src/kicad_project_manager/_build.py
+          cat src/kicad_project_manager/_build.py
+
+      - name: Get appimagetool
+        run: |
+          curl -fsSL -o /usr/local/bin/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
+          echo "${APPIMAGETOOL_SHA256}  /usr/local/bin/appimagetool" | sha256sum -c -
+          chmod +x /usr/local/bin/appimagetool
+
+      - name: Build AppImage
+        run: packaging/linux/build-appimage.sh out/KiCadProjectManager-x86_64.AppImage
+
+      # Containers have no FUSE, so the AppImage unpacks itself instead of mounting.
+      # A missing library or Qt plugin makes it exit right away; a healthy app
+      # sits at its sign-in dialog until the timeout.
+      - name: Smoke test the AppImage
+        run: |
+          code=0
+          HOME="$(mktemp -d)" timeout 15 xvfb-run -a out/KiCadProjectManager-x86_64.AppImage --appimage-extract-and-run || code=$?
+          if [ "$code" != 124 ]; then echo "The AppImage exited early with $code"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: out/*
+          if-no-files-found: error
+
+  # The AppImage leaves the libraries every desktop has to the system, so check
+  # that it starts on the other distributions too, not just where it was built.
+  appimage-test:
+    name: AppImage on ${{ matrix.name }}
+    needs: appimage
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04 / Linux Mint 22
+            image: ubuntu:24.04
+            install: >-
+              apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends
+              git xvfb xauth libgl1 libegl1 libfontconfig1 libdbus-1-3 libglib2.0-0t64 libxkbcommon0
+              libx11-6 libx11-xcb1 libxcb1 libxext6 libxrender1
+          - name: Debian 12 / LMDE 6
+            image: debian:12
+            install: >-
+              apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends
+              git xvfb xauth libgl1 libegl1 libfontconfig1 libdbus-1-3 libglib2.0-0 libxkbcommon0
+              libx11-6 libx11-xcb1 libxcb1 libxext6 libxrender1
+          - name: Fedora
+            image: fedora:latest
+            install: >-
+              dnf install -y git xorg-x11-server-Xvfb xorg-x11-xauth mesa-libGL mesa-libEGL fontconfig dbus-libs glib2
+              libxkbcommon libX11 libX11-xcb libxcb libXext libXrender
+    steps:
+      - name: Install a desktop's basic libraries
+        run: ${{ matrix.install }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: appimage
+
+      - name: Start the AppImage
+        run: |
+          chmod +x KiCadProjectManager-x86_64.AppImage
+          code=0
+          HOME="$(mktemp -d)" timeout 15 xvfb-run -a ./KiCadProjectManager-x86_64.AppImage --appimage-extract-and-run || code=$?
+          if [ "$code" != 124 ]; then echo "The AppImage exited early with $code"; exit 1; fi
+
+  # ---------------------------------------------------------------------------
   # Move the "latest" tag onto this commit and republish it with all downloads.
   # ---------------------------------------------------------------------------
   release:
     name: Publish rolling release
-    needs: [windows, archlinux]
+    needs: [windows, archlinux, appimage, appimage-test]
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -233,8 +346,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           setup="KiCadProjectManager-windows-x64-setup.exe"
+          appimage="KiCadProjectManager-x86_64.AppImage"
           pkg=$(cd artifacts && ls *.pkg.tar.zst | head -n1)
           test -f "artifacts/$setup" || { echo "no $setup"; exit 1; }
+          test -f "artifacts/$appimage" || { echo "no $appimage"; exit 1; }
           test -n "$pkg" || { echo "no Arch package"; exit 1; }
 
           version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
@@ -251,7 +366,8 @@ jobs:
             "commit": "${GITHUB_SHA}",
             "releaseUrl": "$base/tag/latest",
             "windows": $(entry "$setup"),
-            "archlinux": $(entry "$pkg")
+            "archlinux": $(entry "$pkg"),
+            "appimage": $(entry "$appimage")
           }
           JSON
           python3 -m json.tool artifacts/version.json
@@ -273,11 +389,12 @@ jobs:
             echo "| \`KiCadProjectManager-windows-x64-setup.exe\` | Windows 10/11 x64 | Installer, no admin rights needed. Updates itself. |"
             echo "| \`KiCadProjectManager-windows-x64.zip\` | Windows 10/11 x64 | Portable, same files without the installer. Does not update itself. |"
             echo "| \`$pkg\` | Arch Linux | \`sudo pacman -U $pkg\`. Updates itself. |"
+            echo "| \`KiCadProjectManager-x86_64.AppImage\` | Linux Mint 21+, Ubuntu 22.04+, Debian 12+, Fedora and other x86-64 Linux | Make it executable and run it. Adds itself to the application menu and updates itself. |"
             echo
             echo "Requires [Git](https://git-scm.com/downloads) and [KiCad](https://www.kicad.org/download/) 8 or newer."
             echo
-            echo "The Windows build bundles Qt and Qt for Python (PySide6), used under the LGPL v3. They are"
-            echo "shipped as separate DLLs in \`_internal\`, so they can be replaced with builds of your own;"
+            echo "The Windows build and the AppImage bundle Qt and Qt for Python (PySide6), used under the LGPL v3."
+            echo "They are shipped as separate libraries in \`_internal\`, so they can be replaced with builds of your own;"
             echo "their source is available from https://download.qt.io/official_releases/."
             echo
             echo "Built from: $(git log -1 --pretty='%s')"
