@@ -78,12 +78,12 @@ class Git:
             creationflags=_NO_WINDOW,
         )
 
-    def run(self, *args: str, cwd: Path | None = None, timeout: float = 600) -> str:
+    def run(self, *args: str, cwd: Path | None = None, timeout: float = 600, strip: bool = True) -> str:
         """Run git and return stdout; raise :class:`GitError` on failure."""
         proc = self._exec(args, cwd, timeout)
         if proc.returncode != 0:
             raise GitError(list(args), proc.returncode, (proc.stderr or "") + (proc.stdout or ""))
-        return proc.stdout.strip()
+        return proc.stdout.strip() if strip else proc.stdout
 
     def ok(self, *args: str, cwd: Path | None = None, timeout: float = 600) -> bool:
         """Run git and return whether it succeeded."""

@@ -138,3 +138,25 @@ def test_import_requires_kicad_project(git, make_bare, tmp_path):
     (tmp_path / "empty").mkdir()
     with pytest.raises(WorkspaceError):
         Workspace(git, tmp_path / "ws").import_local(Project("X", "team/x"), make_bare("x"), "X", tmp_path / "empty")
+
+
+def test_equivalent_kicad_pro_rewrite_is_not_a_change(setup):
+    import json
+
+    alice, _ = setup
+    pro = alice.path_for(PROJECT) / "motor.kicad_pro"
+    data = json.loads(pro.read_text())
+    data.setdefault("net_settings", {})["net_colors"] = {}
+    pro.write_text(json.dumps(data, indent=2))
+    alice.save(PROJECT, "empty net colors")
+
+    # KiCad on another machine rewrites {} as null and reformats - no real change.
+    data["net_settings"]["net_colors"] = None
+    pro.write_text(json.dumps(data, indent=4))
+    assert alice.changed_files(PROJECT) == []
+    assert '"net_colors": {}' in pro.read_text()
+
+    # A real edit is still reported.
+    data["net_settings"]["net_colors"] = {"GND": "rgb(0, 0, 0)"}
+    pro.write_text(json.dumps(data, indent=2))
+    assert alice.changed_files(PROJECT) == ["motor.kicad_pro"]

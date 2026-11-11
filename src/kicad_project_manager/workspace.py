@@ -16,6 +16,7 @@ local copy is reset to the server version (see :class:`SaveConflict`).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -133,8 +134,41 @@ class Workspace:
     # -- status ----------------------------------------------------------------
 
     def changed_files(self, project: Project) -> list[str]:
-        out = self.git.run("status", "--porcelain", "-uall", cwd=self.path_for(project))
-        return [line[3:] for line in out.splitlines() if line.strip()]
+        self._discard_noise_changes(project)
+        out = self.git.run("status", "--porcelain", "-z", "-uall", cwd=self.path_for(project), strip=False)
+        files: list[str] = []
+        entries = iter(out.split("\0"))
+        for entry in entries:
+            if len(entry) < 4:
+                continue
+            files.append(entry[3:])
+            if "R" in entry[:2] or "C" in entry[:2]:
+                next(entries, None)  # skip the original path of a rename/copy
+        return files
+
+    def _discard_noise_changes(self, project: Project) -> None:
+        """Undo rewrites of ``.kicad_pro`` files that change nothing meaningful.
+
+        KiCad rewrites the project file whenever a project is closed, even without
+        saving. Different KiCad builds serialize empty settings differently
+        (``{}`` vs ``null``), so just opening a teammate's project would otherwise
+        show up as a change - and get uploaded with the next save.
+        """
+        path = self.path_for(project)
+        if not self.git.ok("rev-parse", "--verify", "-q", "HEAD", cwd=path):
+            return
+        try:
+            out = self.git.run("diff", "--name-only", "-z", "HEAD", "--", "*.kicad_pro", cwd=path)
+        except GitError:
+            return
+        for name in filter(None, out.split("\0")):
+            try:
+                committed = json.loads(self.git.run("show", f"HEAD:{name}", cwd=path))
+                current = json.loads((path / name).read_text(encoding="utf-8"))
+            except (GitError, OSError, ValueError):
+                continue  # deleted, unreadable or not valid JSON - a real change
+            if _normalize_json(committed) == _normalize_json(current):
+                self.git.ok("checkout", "HEAD", "--", name, cwd=path)
 
     def state(self, project: Project, fetch: bool = True) -> LocalState:
         if not self.is_cloned(project):
@@ -279,6 +313,17 @@ class Workspace:
         self._git(project, "add", "-A")
         self._git(project, "commit", "-q", "-m", message)
         self._git(project, "push", "-q", "-u", "origin", "main")
+
+
+def _normalize_json(value):
+    """Treat empty containers and ``null`` as equivalent."""
+    if isinstance(value, dict):
+        value = {k: _normalize_json(v) for k, v in value.items()}
+        return value or None
+    if isinstance(value, list):
+        value = [_normalize_json(v) for v in value]
+        return value or None
+    return value
 
 
 def copy_template(template: Path, dest: Path, base: str) -> None:
