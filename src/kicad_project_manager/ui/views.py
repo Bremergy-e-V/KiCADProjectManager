@@ -182,16 +182,10 @@ class CardDelegate(QStyledItemDelegate):
         painter.fillRect(preview_rect, pal.color(QPalette.ColorRole.AlternateBase))
         painter.restore()
         if kind == "folder":
-            pm = self.folder_pixmap
-            painter.drawPixmap(preview_rect.center().x() - pm.width() // 2, preview_rect.center().y() - pm.height() // 2, pm)
+            self._draw_centered(painter, preview_rect.adjusted(8, 8, -8, -8), self.folder_pixmap)
         elif info.preview is not None and not info.preview.isNull():
-            area = preview_rect.adjusted(8, 8, -8, -8)
-            pm = info.preview  # pre-scaled to preview_area() by the caller
-            size = pm.deviceIndependentSize().toSize()
-            if size.width() > area.width() or size.height() > area.height():
-                size = size.scaled(area.size(), Qt.AspectRatioMode.KeepAspectRatio)
-                pm = pm.scaled(size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            painter.drawPixmap(area.x() + (area.width() - size.width()) // 2, area.y() + (area.height() - size.height()) // 2, pm)
+            # pre-scaled to preview_area() by the caller
+            self._draw_centered(painter, preview_rect.adjusted(8, 8, -8, -8), info.preview)
         else:
             painter.setPen(pal.color(QPalette.ColorRole.PlaceholderText))
             painter.drawText(preview_rect, Qt.AlignmentFlag.AlignCenter, "No preview yet")
@@ -249,6 +243,25 @@ class CardDelegate(QStyledItemDelegate):
             painter.setPen(QPen(pal.color(QPalette.ColorRole.Mid), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(card)
+        painter.restore()
+
+    @staticmethod
+    def _draw_centered(painter: QPainter, area: QRect, pm: QPixmap) -> None:
+        """Draw *pm* centred in *area* at its device independent size, shrinking it if needed.
+
+        Positions must use the device independent size: on HiDPI screens pm.width() is in
+        device pixels, and icon themes may return a pixmap of a different size than requested.
+        """
+        if pm.isNull():
+            return
+        size = pm.deviceIndependentSize().toSize()
+        if size.width() > area.width() or size.height() > area.height():
+            size = size.scaled(area.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        target = QRect(QPoint(0, 0), size)
+        target.moveCenter(area.center())
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.drawPixmap(target, pm)
         painter.restore()
 
     @classmethod
