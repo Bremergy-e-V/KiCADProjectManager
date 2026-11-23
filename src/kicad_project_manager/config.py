@@ -16,11 +16,16 @@ import threading
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from .git import Git, GitError
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2  # newest format this version can read
+# Format 2 added "orders". Older versions would silently drop them when saving, so files
+# holding orders are marked as format 2 (older versions then ask to update). Files without
+# orders stay format 1, so teammates on older versions can keep working until the first order.
+ORDERS_FORMAT_VERSION = 2
 CONFIG_FILE = "kicad-projects.json"
 PREVIEW_DIR = "previews"
 TEMPLATES_DIR = "templates"
@@ -82,6 +87,72 @@ class Project:
 
 
 @dataclass
+class Order:
+    """A version of a project sent to a PCB manufacturer."""
+
+    project_id: str
+    repo: str
+    project_name: str  # snapshot, so the order still reads well after the project is renamed or removed
+    commit: str  # full commit id of the ordered version
+    manufacturer: str
+    ordered_on: str  # ISO date, YYYY-MM-DD
+    quantity: int = 1
+    notes: str = ""
+    ordered_by: str = ""
+    commit_date: str = ""  # ISO timestamp of the ordered commit
+    tag: str = ""  # git tag in the project repository, "" if none could be created
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def to_dict(self) -> dict:
+        d = {
+            "id": self.id,
+            "project_id": self.project_id,
+            "repo": self.repo,
+            "project_name": self.project_name,
+            "commit": self.commit,
+            "commit_date": self.commit_date,
+            "manufacturer": self.manufacturer,
+            "ordered_on": self.ordered_on,
+            "quantity": self.quantity,
+            "ordered_by": self.ordered_by,
+        }
+        if self.notes:
+            d["notes"] = self.notes
+        if self.tag:
+            d["tag"] = self.tag
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Order:
+        return cls(
+            project_id=d.get("project_id", ""),
+            repo=d.get("repo", ""),
+            project_name=d.get("project_name", ""),
+            commit=d.get("commit", ""),
+            manufacturer=d.get("manufacturer", ""),
+            ordered_on=d.get("ordered_on", ""),
+            quantity=int(d.get("quantity", 1)),
+            notes=d.get("notes", ""),
+            ordered_by=d.get("ordered_by", ""),
+            commit_date=d.get("commit_date", ""),
+            tag=d.get("tag", ""),
+            id=d.get("id") or uuid.uuid4().hex,
+        )
+
+
+def _check_order(order: Order) -> None:
+    order.manufacturer = order.manufacturer.strip()
+    if not order.manufacturer:
+        raise ConfigError("Please enter where the PCB was ordered.")
+    if order.quantity < 1:
+        raise ConfigError("The quantity must be at least 1.")
+    try:
+        date.fromisoformat(order.ordered_on)
+    except ValueError:
+        raise ConfigError(f"'{order.ordered_on}' is not a valid order date.") from None
+
+
+@dataclass
 class Folder:
     name: str
     folders: list[Folder] = field(default_factory=list)
@@ -117,12 +188,13 @@ class Config:
     default_private: bool = True
     root: Folder = field(default_factory=lambda: Folder(""))
     templates: dict[str, str] = field(default_factory=dict)  # template name -> repo of the project it is made from
+    orders: list[Order] = field(default_factory=list)
 
     # -- serialization -------------------------------------------------------
 
     def to_dict(self) -> dict:
         return {
-            "format": FORMAT_VERSION,
+            "format": ORDERS_FORMAT_VERSION if self.orders else 1,
             "name": self.name,
             "server_url": self.server_url,
             "default_owner": self.default_owner,
@@ -130,6 +202,7 @@ class Config:
             "folders": self.root.to_dict()["folders"],
             "projects": self.root.to_dict()["projects"],
             "templates": dict(sorted(self.templates.items(), key=lambda item: item[0].casefold())),
+            "orders": [o.to_dict() for o in sorted(self.orders, key=lambda o: (o.ordered_on, o.id))],
         }
 
     @classmethod
@@ -143,6 +216,7 @@ class Config:
             default_private=d.get("default_private", True),
             root=Folder.from_dict({"name": "", "folders": d.get("folders", []), "projects": d.get("projects", [])}),
             templates=dict(d.get("templates", {})),
+            orders=[Order.from_dict(o) for o in d.get("orders", [])],
         )
 
     # -- lookup --------------------------------------------------------------
@@ -271,12 +345,51 @@ class Config:
     def remove_template(self, name: str) -> None:
         self.templates.pop(name, None)
 
+    # -- orders --------------------------------------------------------------
+
+    def find_order(self, order_id: str) -> Order:
+        for order in self.orders:
+            if order.id == order_id:
+                return order
+        raise ConfigError("This order no longer exists. Someone may have deleted it.")
+
+    def add_order(self, order: Order) -> Order:
+        _check_order(order)
+        if any(o.id == order.id for o in self.orders):
+            return order
+        self.orders.append(order)
+        return order
+
+    def update_order(self, order_id: str, **fields) -> Order:
+        order = self.find_order(order_id)
+        changed = Order.from_dict({**order.to_dict(), **fields, "id": order.id})
+        _check_order(changed)
+        self.orders[self.orders.index(order)] = changed
+        return changed
+
+    def remove_order(self, order_id: str) -> None:
+        self.orders.remove(self.find_order(order_id))
+
+    def orders_for(self, project_id: str) -> list[Order]:
+        """Orders of one project, newest first."""
+        found = [o for o in self.orders if o.project_id == project_id]
+        return sorted(found, key=lambda o: (o.ordered_on, o.id), reverse=True)
+
+    def manufacturers(self) -> list[str]:
+        """Manufacturers used before, most frequently used first."""
+        counts: dict[str, tuple[str, int]] = {}
+        for o in self.orders:
+            key = o.manufacturer.casefold()
+            name, n = counts.get(key, (o.manufacturer, 0))
+            counts[key] = (name, n + 1)
+        return [name for name, _n in sorted(counts.values(), key=lambda item: (-item[1], item[0].casefold()))]
+
 
 README_TEXT = """# {name}
 
 This repository is managed by **KiCad Project Manager**.
 
-* `{config}` - folder structure, project list and templates
+* `{config}` - folder structure, project list, templates and PCB orders
 * `{previews}/` - preview images (one PNG per project id)
 * `{templates}/<name>/` - optional: copies of KiCad projects offered as templates for new projects
 

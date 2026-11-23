@@ -5,11 +5,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -530,6 +532,102 @@ class SaveDialog(QDialog):
 
     def text(self) -> str:
         return self.message.toPlainText().strip()
+
+
+COMMON_MANUFACTURERS = ["JLCPCB", "PCBWay", "Aisler", "Eurocircuits", "OSH Park"]
+
+
+class OrderDialog(QDialog):
+    """Where, when and how many boards of a project version were ordered. Also used to edit an order."""
+
+    def __init__(
+        self,
+        project_name: str,
+        version_text: str,
+        manufacturers: list[str],
+        warning: str = "",
+        order=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit order of {project_name}" if order else f"Mark {project_name} as ordered")
+        self.resize(480, 0)
+
+        version = QLabel(version_text)
+        version.setWordWrap(True)
+        version.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        warn = QLabel(warning)
+        warn.setWordWrap(True)
+        warn.setStyleSheet("color: #e65100;")
+        warn.setVisible(bool(warning))
+
+        self.manufacturer = QComboBox()
+        self.manufacturer.setEditable(True)
+        names = list(manufacturers)
+        names += [m for m in COMMON_MANUFACTURERS if m.casefold() not in {n.casefold() for n in names}]
+        self.manufacturer.addItems(names)
+        self.manufacturer.lineEdit().setPlaceholderText("e.g. JLCPCB")
+
+        today = QDate.currentDate()
+        self.ordered_on = QDateEdit(today)
+        self.ordered_on.setCalendarPopup(True)
+        self.ordered_on.setMaximumDate(today)
+        self.ordered_on.setDisplayFormat("dd MMM yyyy")
+
+        self.quantity = QSpinBox()
+        self.quantity.setRange(1, 100000)
+        self.quantity.setValue(5)
+        self.quantity.setSuffix(" pcs")
+
+        self.notes = QPlainTextEdit()
+        self.notes.setPlaceholderText("e.g. order number, color, thickness, assembled or not")
+        self.notes.setMaximumHeight(90)
+
+        if order is not None:
+            self.manufacturer.setCurrentText(order.manufacturer)
+            ordered = QDate.fromString(order.ordered_on, Qt.DateFormat.ISODate)
+            if ordered.isValid():
+                self.ordered_on.setMaximumDate(max(today, ordered))
+                self.ordered_on.setDate(ordered)
+            self.quantity.setValue(order.quantity)
+            self.notes.setPlainText(order.notes)
+
+        self.error = _error_label()
+        form = QFormLayout()
+        form.addRow("Version:", version)
+        form.addRow("Ordered from:", self.manufacturer)
+        form.addRow("Ordered on:", self.ordered_on)
+        form.addRow("Quantity:", self.quantity)
+        form.addRow("Notes:", self.notes)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Save" if order else "Mark as Ordered")
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(warn)
+        layout.addWidget(self.error)
+        layout.addWidget(buttons)
+        if order is None:
+            self.manufacturer.setCurrentText(names[0] if manufacturers else "")
+        self.manufacturer.setFocus()
+
+    def _accept(self) -> None:
+        if not self.manufacturer.currentText().strip():
+            self.error.setText("Please enter where the PCB was ordered.")
+            self.error.show()
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        """The entered values, as keyword arguments for :class:`~kicad_project_manager.config.Order`."""
+        return {
+            "manufacturer": self.manufacturer.currentText().strip(),
+            "ordered_on": self.ordered_on.date().toString(Qt.DateFormat.ISODate),
+            "quantity": self.quantity.value(),
+            "notes": self.notes.toPlainText().strip(),
+        }
 
 
 class SettingsDialog(QDialog):

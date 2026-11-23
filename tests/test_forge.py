@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from kicad_project_manager.forge import ForgeError, GitHubForge, guess_kind, make_forge
+from kicad_project_manager.forge import ForgeError, GitHubForge, TagExists, guess_kind, make_forge
 
 
 class FakeServer:
@@ -164,3 +164,62 @@ def test_unreachable_server():
     with pytest.raises(ForgeError) as info:
         forge.current_user()
     assert info.value.status == 0
+
+
+def test_gitea_head_commit_and_tag(server):
+    base = "/api/v1"
+    commit = {"sha": "abc1234def", "commit": {"author": {"name": "A", "date": "2026-10-01T10:00:00Z"}}}
+    server.routes[("GET", f"{base}/repos/PCB/a/commits")] = (200, [commit])
+    server.routes[("GET", f"{base}/repos/PCB/empty/commits")] = (409, {"message": "empty"})
+    server.routes[("POST", f"{base}/repos/PCB/a/tags")] = (201, {})
+    server.routes[("POST", f"{base}/repos/PCB/b/tags")] = (409, {"message": "tag already exists"})
+    forge = make_forge("gitea", server.url, "tok")
+    sha, when = forge.head_commit("PCB/a")
+    assert (sha, when.hour) == ("abc1234def", 10)
+    assert forge.head_commit("PCB/empty") is None
+    forge.create_tag("PCB/a", "ordered/2026-11-23-JLCPCB", "abc1234def", "Ordered")
+    assert server.last("POST", f"{base}/repos/PCB/a/tags")["body"] == {
+        "tag_name": "ordered/2026-11-23-JLCPCB",
+        "target": "abc1234def",
+        "message": "Ordered",
+    }
+    with pytest.raises(TagExists):
+        forge.create_tag("PCB/b", "x", "abc1234def")
+    assert forge.tree_web_url("PCB/a", "ordered/x") == f"{server.url}/PCB/a/src/tag/ordered/x"
+    assert forge.tree_web_url("PCB/a", "abc1234def") == f"{server.url}/PCB/a/src/commit/abc1234def"
+
+
+def test_github_head_commit_and_tag(server):
+    base = "/api/v3"
+    commit = {"sha": "f00", "commit": {"author": {"name": "K", "date": "2026-10-01T09:00:00Z"}}}
+    server.routes[("GET", f"{base}/repos/o/a/commits")] = (200, [commit])
+    server.routes[("POST", f"{base}/repos/o/a/git/refs")] = (201, {})
+    server.routes[("POST", f"{base}/repos/o/b/git/refs")] = (422, {"message": "Reference already exists"})
+    server.routes[("POST", f"{base}/repos/o/c/git/refs")] = (422, {"message": "Object does not exist"})
+    forge = make_forge("github", server.url, "tok")
+    assert forge.head_commit("o/a")[0] == "f00"
+    forge.create_tag("o/a", "ordered/t", "f00")
+    assert server.last("POST", f"{base}/repos/o/a/git/refs")["body"] == {"ref": "refs/tags/ordered/t", "sha": "f00"}
+    with pytest.raises(TagExists):
+        forge.create_tag("o/b", "ordered/t", "f00")
+    with pytest.raises(ForgeError) as info:
+        forge.create_tag("o/c", "ordered/t", "f00")
+    assert not isinstance(info.value, TagExists)
+    assert forge.tree_web_url("o/a", "ordered/t") == f"{server.url}/o/a/tree/ordered/t"
+
+
+def test_gitlab_head_commit_and_tag(server):
+    base = "/api/v4"
+    commits = [{"id": "beef", "committed_date": "2026-10-02T08:00:00.000+02:00", "author_name": "Bob"}]
+    server.routes[("GET", f"{base}/projects/hw%2Fmotor/repository/commits")] = (200, commits)
+    server.routes[("POST", f"{base}/projects/hw%2Fmotor/repository/tags")] = (201, {})
+    server.routes[("POST", f"{base}/projects/hw%2Fold/repository/tags")] = (400, {"message": "Tag ordered/t already exists"})
+    forge = make_forge("gitlab", server.url, "tok")
+    sha, when = forge.head_commit("hw/motor")
+    assert (sha, when.hour) == ("beef", 8)
+    forge.create_tag("hw/motor", "ordered/t", "beef", "msg")
+    body = server.last("POST", f"{base}/projects/hw%2Fmotor/repository/tags")["body"]
+    assert body == {"tag_name": "ordered/t", "ref": "beef", "message": "msg"}
+    with pytest.raises(TagExists):
+        forge.create_tag("hw/old", "ordered/t", "beef")
+    assert forge.tree_web_url("hw/motor", "ordered/t") == f"{server.url}/hw/motor/-/tree/ordered/t"

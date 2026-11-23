@@ -20,6 +20,8 @@ Git runs underneath, but nobody has to set it up or type a git command.
 - **Import Local** uploads a KiCad project from your computer: it creates a new repository, copies the project into your projects folder (without backups, lock and autosave files) and adds it to the current folder. The original folder is left untouched.
 - **Convert to Template** (right-click a project) offers a project as a template that everyone can pick under *New Project*. The project stays a normal project: open it, change it and save it to the server, and new projects start from that version.
 - **Revert to Server State** (right-click a project) throws away all your local changes, including saves that never reached the server, after asking for confirmation.
+- **Mark as Ordered** (right-click a project) records that the newest server version of a board was ordered: where, when, how many and any notes, plus who ordered it. The version is also tagged in the project repository (e.g. `ordered/2026-11-23-JLCPCB`), so the exact files that went to the manufacturer are easy to find. The *Ordered* submenu lists the earlier orders of a project.
+- **Orders** (toolbar) opens a window listing all orders of all projects. Click a column header to sort, search or pick a project to filter, and double-click an order to see the ordered version on the server.
 - **Save to server** uploads your changes with a short description. If a teammate changed something else in the meantime, the two sets of changes are combined automatically. If you both changed the same thing, nothing is lost: your version goes to a separate branch on the server and you get a clear message (see [Conflicts](#conflicts)).
 - **No git setup needed.** You sign in with a personal access token. The app passes it to git itself, so there are no SSH keys or credential helpers to configure, and the token is never written into a remote URL. The token is kept in the system keychain, and commits are made with your account's name.
 - **Updates itself.** On start, the app checks for a new release and offers to install it. You can choose *Update Now*, *Not Now* or *Skip This Version*.
@@ -61,7 +63,7 @@ After installing, search for **KiCad Project Manager** in the start menu or your
 All shared state lives in a **config repository** on your server:
 
 ```
-kicad-projects.json      folder structure, project list and templates
+kicad-projects.json      folder structure, project list, templates and PCB orders
 previews/<id>.png        one preview image per project
 templates/<name>/        optional: copies of KiCad projects offered as templates (older versions)
 README.md

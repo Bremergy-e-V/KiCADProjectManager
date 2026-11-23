@@ -25,6 +25,10 @@ class ForgeError(Exception):
         super().__init__(message)
 
 
+class TagExists(ForgeError):
+    """A tag of that name already exists in the repository."""
+
+
 @dataclass
 class User:
     login: str
@@ -147,8 +151,20 @@ class Forge(ABC):
     def last_commit(self, full_name: str) -> tuple[datetime, str] | None:
         """Date and author name of the newest commit on the default branch (None if empty)."""
 
+    @abstractmethod
+    def head_commit(self, full_name: str) -> tuple[str, datetime] | None:
+        """Commit id and date of the newest commit on the default branch (None if empty)."""
+
+    @abstractmethod
+    def create_tag(self, full_name: str, tag: str, sha: str, message: str = "") -> None:
+        """Create the tag ``tag`` on commit ``sha``. Raises :class:`TagExists` if it already exists."""
+
     def repo_web_url(self, full_name: str) -> str:
         return f"{self.url}/{full_name}"
+
+    def tree_web_url(self, full_name: str, ref: str) -> str:
+        """Web page showing the files of ``full_name`` at a tag or commit."""
+        return f"{self.url}/{full_name}/tree/{quote(ref, safe='/')}"
 
     @classmethod
     def token_help(cls, url: str) -> str:
@@ -198,16 +214,35 @@ class GiteaForge(Forge):
             return self._repo(self._request("POST", "/user/repos", body=body))
         return self._repo(self._request("POST", f"/orgs/{quote(owner)}/repos", body=body))
 
-    def last_commit(self, full_name: str) -> tuple[datetime, str] | None:
+    def _newest_commits(self, full_name: str) -> list | None:
         owner, name = split_repo(full_name)
         params = {"limit": 1, "stat": "false", "verification": "false", "files": "false"}
         try:
-            commits = self._request("GET", f"/repos/{quote(owner)}/{quote(name)}/commits", params)
+            return self._request("GET", f"/repos/{quote(owner)}/{quote(name)}/commits", params)
         except ForgeError as e:
             if e.status == 409:  # empty repository
                 return None
             raise
-        return _github_style_commit(commits)
+
+    def last_commit(self, full_name: str) -> tuple[datetime, str] | None:
+        return _github_style_commit(self._newest_commits(full_name))
+
+    def head_commit(self, full_name: str) -> tuple[str, datetime] | None:
+        return _github_style_head(self._newest_commits(full_name))
+
+    def create_tag(self, full_name: str, tag: str, sha: str, message: str = "") -> None:
+        owner, name = split_repo(full_name)
+        body = {"tag_name": tag, "target": sha, "message": message}
+        try:
+            self._request("POST", f"/repos/{quote(owner)}/{quote(name)}/tags", body=body)
+        except ForgeError as e:
+            if e.status in (409, 422):
+                raise TagExists(e.status, str(e)) from None
+            raise
+
+    def tree_web_url(self, full_name: str, ref: str) -> str:
+        kind = "commit" if _is_commit_id(ref) else "tag"
+        return f"{self.url}/{full_name}/src/{kind}/{quote(ref, safe='/')}"
 
     @classmethod
     def token_help(cls, url: str) -> str:
@@ -218,13 +253,30 @@ class GiteaForge(Forge):
         )
 
 
+def _parse_date(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _is_commit_id(ref: str) -> bool:
+    return len(ref) >= 7 and all(c in "0123456789abcdef" for c in ref.lower())
+
+
+def _github_style_date(commit: dict) -> datetime:
+    return _parse_date((commit.get("committer") or commit.get("author") or {})["date"])
+
+
 def _github_style_commit(commits: list | None) -> tuple[datetime, str] | None:
     if not commits:
         return None
     commit = commits[0]["commit"]
     author = commit.get("author") or {}
-    date = (commit.get("committer") or author)["date"]
-    return datetime.fromisoformat(date.replace("Z", "+00:00")), author.get("name") or ""
+    return _github_style_date(commit), author.get("name") or ""
+
+
+def _github_style_head(commits: list | None) -> tuple[str, datetime] | None:
+    if not commits:
+        return None
+    return commits[0]["sha"], _github_style_date(commits[0]["commit"])
 
 
 # -- GitHub ----------------------------------------------------------------------------
@@ -273,15 +325,30 @@ class GitHubForge(Forge):
             return self._repo(self._request("POST", "/user/repos", body=body))
         return self._repo(self._request("POST", f"/orgs/{quote(owner)}/repos", body=body))
 
-    def last_commit(self, full_name: str) -> tuple[datetime, str] | None:
+    def _newest_commits(self, full_name: str) -> list | None:
         owner, name = split_repo(full_name)
         try:
-            commits = self._request("GET", f"/repos/{quote(owner)}/{quote(name)}/commits", {"per_page": 1})
+            return self._request("GET", f"/repos/{quote(owner)}/{quote(name)}/commits", {"per_page": 1})
         except ForgeError as e:
             if e.status == 409:  # empty repository
                 return None
             raise
-        return _github_style_commit(commits)
+
+    def last_commit(self, full_name: str) -> tuple[datetime, str] | None:
+        return _github_style_commit(self._newest_commits(full_name))
+
+    def head_commit(self, full_name: str) -> tuple[str, datetime] | None:
+        return _github_style_head(self._newest_commits(full_name))
+
+    def create_tag(self, full_name: str, tag: str, sha: str, message: str = "") -> None:
+        owner, name = split_repo(full_name)
+        body = {"ref": f"refs/tags/{tag}", "sha": sha}
+        try:
+            self._request("POST", f"/repos/{quote(owner)}/{quote(name)}/git/refs", body=body)
+        except ForgeError as e:
+            if e.status == 422 and "already exists" in str(e).lower():
+                raise TagExists(e.status, str(e)) from None
+            raise
 
     @classmethod
     def token_help(cls, url: str) -> str:
@@ -343,7 +410,7 @@ class GitLabForge(Forge):
             body["namespace_id"] = self._request("GET", f"/namespaces/{self._id(owner)}")["id"]
         return self._repo(self._request("POST", "/projects", body=body))
 
-    def last_commit(self, full_name: str) -> tuple[datetime, str] | None:
+    def _newest_commit(self, full_name: str) -> dict | None:
         try:
             commits = self._request("GET", f"/projects/{self._id(full_name)}/repository/commits", {"per_page": 1})
         except ForgeError as e:
@@ -351,9 +418,33 @@ class GitLabForge(Forge):
                 self.get_repo(full_name)  # raises if the project itself is missing
                 return None  # project exists but has no commits yet
             raise
-        if not commits:
+        return commits[0] if commits else None
+
+    def last_commit(self, full_name: str) -> tuple[datetime, str] | None:
+        commit = self._newest_commit(full_name)
+        if commit is None:
             return None
-        return datetime.fromisoformat(commits[0]["committed_date"].replace("Z", "+00:00")), commits[0].get("author_name") or ""
+        return _parse_date(commit["committed_date"]), commit.get("author_name") or ""
+
+    def head_commit(self, full_name: str) -> tuple[str, datetime] | None:
+        commit = self._newest_commit(full_name)
+        if commit is None:
+            return None
+        return commit["id"], _parse_date(commit["committed_date"])
+
+    def create_tag(self, full_name: str, tag: str, sha: str, message: str = "") -> None:
+        body = {"tag_name": tag, "ref": sha}
+        if message:
+            body["message"] = message
+        try:
+            self._request("POST", f"/projects/{self._id(full_name)}/repository/tags", body=body)
+        except ForgeError as e:
+            if e.status in (400, 409) and "already exists" in str(e).lower():
+                raise TagExists(e.status, str(e)) from None
+            raise
+
+    def tree_web_url(self, full_name: str, ref: str) -> str:
+        return f"{self.url}/{full_name}/-/tree/{quote(ref, safe='/')}"
 
     @classmethod
     def token_help(cls, url: str) -> str:

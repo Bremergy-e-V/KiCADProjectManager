@@ -34,8 +34,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import APP_ID, APP_NAME, updater
-from ..config import Config, ConfigError, ConfigRepo, FolderPath, Project, check_template_name, format_path
-from ..forge import Forge, ForgeError, Repo, User, make_forge
+from ..config import Config, ConfigError, ConfigRepo, FolderPath, Order, Project, check_template_name, format_path
+from ..forge import Forge, ForgeError, Repo, TagExists, User, make_forge
 from ..git import Git, GitError, GitIdentity
 from ..preview import render_preview
 from ..settings import Settings, data_dir, get_token, set_token
@@ -47,10 +47,12 @@ from .dialogs import (
     ImportProjectDialog,
     InitConfigDialog,
     NewProjectDialog,
+    OrderDialog,
     SaveDialog,
     SettingsDialog,
     _WaitCursor,
 )
+from .orders import OrdersWindow, format_order
 from .tasks import TaskRunner
 from .views import ROLE_KEY, CardDelegate, CardInfo, DragItem, FolderTree, ProjectGrid
 
@@ -105,6 +107,7 @@ class MainWindow(QMainWindow):
         self._previews: dict[str, tuple[float, QPixmap]] = {}
         self._refreshing = False
         self._notice = ""
+        self.orders_window: OrdersWindow | None = None
 
         self.setWindowTitle(APP_NAME)
         self.resize(1200, 760)
@@ -169,10 +172,17 @@ class MainWindow(QMainWindow):
         )
         settings_icon = QIcon.fromTheme("preferences-system", self._icon("document-properties", sp.SP_FileDialogDetailedView))
         self.act_settings = action("Settings", settings_icon, lambda: self.open_settings())
+        self.act_orders = action(
+            "Orders",
+            self._icon("view-list-details", sp.SP_FileDialogListView),
+            lambda: self.show_orders(),
+            tip="All PCB orders of all projects",
+        )
         for a in (self.act_add_existing, self.act_new_project, self.act_import, self.act_new_folder):
             toolbar.addAction(a)
         toolbar.addSeparator()
         toolbar.addAction(self.act_refresh)
+        toolbar.addAction(self.act_orders)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
@@ -269,6 +279,8 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, title, text)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self.orders_window is not None:
+            self.orders_window.close()
         qs = QSettings(APP_ID, "window")
         qs.setValue("geometry", self.saveGeometry())
         qs.setValue("splitter", self.splitter.saveState())
@@ -432,6 +444,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{config.name} - {APP_NAME}")
         self._rebuild_tree()
         self._rebuild_grid()
+        if self.orders_window is not None:
+            self.orders_window.set_config(config)
 
     def _expanded_paths(self) -> set[FolderPath]:
         result = set()
@@ -1220,6 +1234,104 @@ class MainWindow(QMainWindow):
         info = self.repo_info.get(project.repo.casefold())
         QDesktopServices.openUrl(QUrl(info.html_url if info and info.html_url else self.forge.repo_web_url(project.repo)))
 
+    # -------------------------------------------------------------- orders --
+
+    def mark_ordered(self, pid: str) -> None:
+        """Record the newest server version of a project as ordered, and tag it in the project repository."""
+        project = self._projects[pid][1]
+        state = (self.meta.get(pid) or ProjectMeta()).state
+
+        def done(head):
+            if head is None:
+                QMessageBox.information(self, project.name, "This project has no version on the server yet, so there is nothing to order.")
+                return
+            sha, when = head
+            warning = ""
+            if state is not None and (state.changed_files or state.ahead):
+                warning = "You have local changes that are not on the server. They are not part of this version - save to server first if they should be."
+            version = f"Newest version on the server, from {when.astimezone():%d %b %Y %H:%M} ({sha[:7]})"
+            dialog = OrderDialog(project.name, version, self.config.manufacturers(), warning, parent=self)
+            if dialog.exec():
+                self._record_order(project, sha, when.isoformat(), dialog.values())
+
+        self._project_task(
+            pid, "Checking server version…", partial(self.forge.head_commit, project.repo), done, "Could not mark as ordered"
+        )
+
+    def _record_order(self, project: Project, sha: str, commit_date: str, values: dict) -> None:
+        user = self.forge.current_user()
+        order = Order(
+            project_id=project.id,
+            repo=project.repo,
+            project_name=project.name,
+            commit=sha,
+            commit_date=commit_date,
+            ordered_by=user.name or user.login,
+            **values,
+        )
+        try:
+            Config.from_dict(self.config.to_dict()).add_order(order)  # validate before tagging
+        except ConfigError as e:
+            self.show_error(e, "Not possible")
+            return
+
+        def tag() -> str:
+            slug = "".join(c if c.isalnum() or c in "-_." else "-" for c in order.manufacturer).strip("-.") or "order"
+            base = f"ordered/{order.ordered_on}-{slug}"
+            message = f"Ordered {order.quantity} pcs from {order.manufacturer} on {order.ordered_on}"
+            for n in range(1, 50):
+                name = base if n == 1 else f"{base}-{n}"
+                try:
+                    self.forge.create_tag(project.repo, name, sha, message)
+                    return name
+                except TagExists:
+                    continue
+            raise ForgeError(0, f"Too many tags named {base}")
+
+        def tagged(name: str) -> None:
+            order.tag = name
+            save(f" (tag {name})")
+
+        def not_tagged(error) -> None:
+            save(f" - could not create a git tag: {error}")
+
+        def save(note: str) -> None:
+            self._mutate(
+                lambda c, _r: c.add_order(order),
+                f"Order {project.name} from {order.manufacturer}",
+                lambda _c: self.notify(f"'{project.name}' marked as ordered from {order.manufacturer}{note}"),
+            )
+
+        self.runner.run(tag, tagged, not_tagged, label=f"Tagging {project.name}…")
+
+    def show_orders(self, project_id: str = "", order_id: str = "") -> None:
+        if self.config is None:
+            return
+        if self.orders_window is None:
+            self.orders_window = OrdersWindow(self._open_order, self._edit_order, self._delete_order, self)
+            self.orders_window.set_config(self.config)
+        self.orders_window.show_project(project_id, order_id)
+
+    def _open_order(self, order: Order) -> None:
+        QDesktopServices.openUrl(QUrl(self.forge.tree_web_url(order.repo, order.tag or order.commit)))
+
+    def _edit_order(self, order: Order) -> None:
+        version = f"{order.commit[:7]}" + (f" (tag {order.tag})" if order.tag else "")
+        parent = self.orders_window or self
+        dialog = OrderDialog(order.project_name, version, self.config.manufacturers(), order=order, parent=parent)
+        if not dialog.exec():
+            return
+        values = dialog.values()
+        self._mutate(lambda c, _r: c.update_order(order.id, **values), f"Edit order of {order.project_name}")
+
+    def _delete_order(self, order: Order) -> None:
+        text = f"Delete the order '{format_order(order)}' of {order.project_name}?"
+        if order.tag:
+            text += f"\n\nThe git tag '{order.tag}' stays in the project repository."
+        if QMessageBox.question(self.orders_window or self, "Delete order", text) != QMessageBox.StandardButton.Yes:
+            return
+        self._mutate(lambda c, _r: c.remove_order(order.id), f"Delete order of {order.project_name}")
+
     # ---------------------------------------------------------- menus etc --
 
     def _grid_activated(self, item) -> None:
@@ -1262,6 +1374,15 @@ class MainWindow(QMainWindow):
                 else:
                     menu.addAction("Rename Template…", lambda: self.convert_to_template(key))
                     menu.addAction("Stop Using as Template", lambda: self.stop_template(key))
+                menu.addSeparator()
+                menu.addAction("Mark as Ordered…", lambda: self.mark_ordered(key))
+                orders = self.config.orders_for(key)
+                if orders:
+                    sub = menu.addMenu(f"Ordered ({len(orders)})")
+                    for order in orders:
+                        sub.addAction(format_order(order), partial(self.show_orders, key, order.id))
+                    sub.addSeparator()
+                    sub.addAction("Show All Orders…", lambda: self.show_orders())
                 menu.addSeparator()
                 menu.addAction("Rename…", lambda: self.rename_project(key))
                 menu.addAction("Remove from List…", lambda: self.remove_project(key))

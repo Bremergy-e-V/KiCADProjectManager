@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from kicad_project_manager.config import CONFIG_FILE, Config, ConfigError, ConfigRepo, Project
+from kicad_project_manager.config import CONFIG_FILE, Config, ConfigError, ConfigRepo, Order, Project
 
 
 def sample() -> Config:
@@ -163,3 +163,58 @@ def test_legacy_template_folder_still_offered(git, make_bare, tmp_path):
     (repo.path / "template").mkdir()
     (repo.path / "template" / "T.kicad_pro").write_text("{}")
     assert list(repo.template_folders()) == ["Team template"]
+
+
+def _order(**kw) -> Order:
+    fields = {
+        "project_id": "m",
+        "repo": "PCB_Engineering/motor",
+        "project_name": "Motor Controller",
+        "commit": "a" * 40,
+        "manufacturer": "JLCPCB",
+        "ordered_on": "2026-11-20",
+        "quantity": 5,
+    }
+    return Order(**{**fields, **kw})
+
+
+def test_orders_round_trip_and_format():
+    c = sample()
+    assert c.to_dict()["format"] == 1  # no orders: older versions can still read it
+    c.add_order(_order(id="o1", notes="black mask", tag="ordered/2026-11-20-JLCPCB"))
+    d = json.loads(json.dumps(c.to_dict()))
+    assert d["format"] == 2
+    again = Config.from_dict(d)
+    assert again.to_dict() == c.to_dict()
+    assert again.find_order("o1").notes == "black mask"
+    with pytest.raises(ConfigError, match="newer version"):
+        Config.from_dict({**d, "format": 3})
+
+
+def test_old_config_without_orders_is_read():
+    old = {"format": 1, "name": "PCBs", "folders": [], "projects": [{"id": "x", "name": "X", "repo": "o/x"}]}
+    c = Config.from_dict(old)
+    assert c.orders == []
+    assert c.find_project("x")[1].name == "X"
+
+
+def test_order_operations():
+    c = sample()
+    c.add_order(_order(id="o1", ordered_on="2026-10-01", manufacturer=" Aisler "))
+    c.add_order(_order(id="o2", ordered_on="2026-11-01"))
+    c.add_order(_order(id="o3", ordered_on="2026-11-05", manufacturer="jlcpcb"))
+    c.add_order(_order(id="j1", project_id="j", ordered_on="2026-09-01"))
+    assert c.find_order("o1").manufacturer == "Aisler"  # trimmed
+    assert [o.id for o in c.orders_for("m")] == ["o3", "o2", "o1"]
+    assert c.manufacturers() == ["JLCPCB", "Aisler"]  # most used first, case-insensitive
+    c.update_order("o2", quantity=10, notes="ENIG")
+    assert (c.find_order("o2").quantity, c.find_order("o2").notes) == (10, "ENIG")
+    for bad in ({"manufacturer": "  "}, {"quantity": 0}, {"ordered_on": "yesterday"}):
+        with pytest.raises(ConfigError):
+            c.update_order("o2", **bad)
+    c.remove_order("o1")
+    with pytest.raises(ConfigError):
+        c.find_order("o1")
+    c.remove_project("m")  # orders outlive the project
+    assert [o.id for o in c.orders_for("m")] == ["o3", "o2"]
+    assert [o["id"] for o in c.to_dict()["orders"]] == ["j1", "o2", "o3"]  # stable order in the file
