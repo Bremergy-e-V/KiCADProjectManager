@@ -21,9 +21,9 @@ def _send_drag(widget, pos, mime):
     pos = QPointF(pos)
     actions = Qt.DropAction.MoveAction
     buttons, mods = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
-    enter = QDragEnterEvent(pos.toPoint(), actions, mime, buttons, mods)
+    enter = QDragEnterEvent(pos, actions, mime, buttons, mods)
     QApplication.sendEvent(widget, enter)
-    move = QDragMoveEvent(pos.toPoint(), actions, mime, buttons, mods)
+    move = QDragMoveEvent(pos, actions, mime, buttons, mods)
     QApplication.sendEvent(widget, move)
     accepted = move.isAccepted()
     drop = QDropEvent(pos, actions, mime, buttons, mods)
