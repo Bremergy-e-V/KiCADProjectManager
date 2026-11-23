@@ -188,7 +188,7 @@ def test_orders_round_trip_and_format():
     assert again.to_dict() == c.to_dict()
     assert again.find_order("o1").notes == "black mask"
     with pytest.raises(ConfigError, match="newer version"):
-        Config.from_dict({**d, "format": 3})
+        Config.from_dict({**d, "format": 4})
 
 
 def test_old_config_without_orders_is_read():
@@ -218,3 +218,25 @@ def test_order_operations():
     c.remove_project("m")  # orders outlive the project
     assert [o.id for o in c.orders_for("m")] == ["o3", "o2"]
     assert [o["id"] for o in c.to_dict()["orders"]] == ["j1", "o2", "o3"]  # stable order in the file
+
+
+def test_partdb_round_trip_and_format():
+    c = sample()
+    c.set_partdb_url("https://partdb.example.com/")
+    assert c.partdb_url == "https://partdb.example.com"
+    c.set_partdb_assignment("m", 47)
+    c.set_partdb_assignment("m", 47, 99)
+    d = json.loads(json.dumps(c.to_dict()))
+    assert d["format"] == 3
+    again = Config.from_dict(d)
+    assert again.to_dict() == c.to_dict()
+    project = again.find_project("m")[1]
+    assert (project.partdb_parent, project.partdb_project) == (47, 99)
+    assert again.find_project("j")[1].partdb_parent is None
+
+    again.set_partdb_assignment("m", 50)  # a new parent gets its own subproject
+    assert (again.find_project("m")[1].partdb_parent, again.find_project("m")[1].partdb_project) == (50, None)
+    again.set_partdb_assignment("m", None)
+    again.set_partdb_url("")
+    assert again.to_dict()["format"] == 1
+    assert "partdb_parent" not in again.to_dict()["folders"][0]["folders"][0]["projects"][0]

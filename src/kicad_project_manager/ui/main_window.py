@@ -38,8 +38,9 @@ from .. import APP_ID, APP_NAME, updater
 from ..config import Config, ConfigError, ConfigRepo, FolderPath, Order, Project, check_template_name, format_path
 from ..forge import Forge, ForgeError, Repo, TagExists, User, make_forge
 from ..git import Git, GitError, GitIdentity
+from ..partdb import PartDB, PartDBError, SyncResult, sync_project
 from ..preview import render_preview
-from ..settings import Settings, data_dir, get_token, set_token
+from ..settings import Settings, data_dir, get_partdb_token, get_token, set_partdb_token, set_token
 from ..workspace import LocalState, Workspace, WorkspaceError, find_kicad_tool, find_project_file, launch_kicad
 from .dialogs import (
     AddExistingDialog,
@@ -49,6 +50,7 @@ from .dialogs import (
     InitConfigDialog,
     NewProjectDialog,
     OrderDialog,
+    PartDBProjectDialog,
     SaveDialog,
     SettingsDialog,
     _WaitCursor,
@@ -994,17 +996,29 @@ class MainWindow(QMainWindow):
             return
         message = dialog.text() or f"Update {project.name}"
 
+        partdb = self._partdb() if project.partdb_parent else None
+
         def work():
             self.workspace.set_url(project, self.clone_url(project.repo))
             result = self.workspace.save(project, message, self.settings.username)
-            config = None if result.startswith("Nothing") else self._render_and_publish([project])
-            return result, config
+            if result.startswith("Nothing"):
+                return result, None, None
+            config = self._render_and_publish([project])
+            synced: SyncResult | Exception | None = None
+            if partdb is not None:
+                try:
+                    synced = self._sync_partdb(project, self.workspace.path_for(project), partdb)
+                except (PartDBError, OSError) as e:  # the save itself worked - only report this
+                    synced = e
+            return result, config, synced
 
         def done(result):
-            text, config = result
+            text, config, synced = result
             self.notify(f"{project.name}: {text}")
             if config is not None:
                 self._apply_config(config)
+            if synced is not None:
+                self._partdb_synced(project, synced)
 
         self._project_task(pid, "Saving…", work, done, error_title="Could not save to server")
 
@@ -1305,6 +1319,94 @@ class MainWindow(QMainWindow):
 
         self.runner.run(tag, tagged, not_tagged, label=f"Tagging {project.name}…")
 
+    # ------------------------------------------------------------- Part-DB --
+
+    def _partdb(self) -> PartDB | None:
+        """A Part-DB client, or None if the team has no Part-DB server or this user has no token."""
+        url = self.config.partdb_url if self.config is not None else ""
+        token = get_partdb_token(url) if url else ""
+        return PartDB(url, token) if url and token else None
+
+    def _partdb_or_ask(self) -> PartDB | None:
+        partdb = self._partdb()
+        if partdb is None:
+            answer = QMessageBox.question(
+                self, "Part-DB", "To use Part-DB, enter your personal Part-DB API token in Settings.\n\nOpen Settings now?"
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.open_settings()
+                partdb = self._partdb()
+        return partdb
+
+    def _sync_partdb(self, project: Project, source: Path, partdb: PartDB) -> SyncResult:
+        """Export the BOM from ``source`` and sync it into the PCB's Part-DB project (blocking)."""
+        cli = self.settings.kicad_cli_path or find_kicad_tool("kicad-cli")
+        if not cli:
+            raise PartDBError("kicad-cli was not found, so the BOM cannot be exported. Please set it in Settings.")
+        return sync_project(cli, source, project.repo_name, partdb, project.partdb_parent, project.partdb_project, project.name)
+
+    def _partdb_synced(self, project: Project, result: SyncResult | Exception) -> None:
+        if isinstance(result, Exception):
+            QMessageBox.warning(self, "Part-DB", f"The BOM of '{project.name}' could not be sent to Part-DB:\n\n{result}")
+            return
+        self.notify(f"{project.name}: {result.summary()}")
+        if result.subproject_id != project.partdb_project:
+            pid, parent, sub = project.id, project.partdb_parent, result.subproject_id
+            self._mutate(lambda c, _r: c.set_partdb_assignment(pid, parent, sub), f"Link {project.name} to its Part-DB project")
+
+    def assign_partdb(self, pid: str) -> None:
+        project = self._projects[pid][1]
+        partdb = self._partdb_or_ask()
+        if partdb is None:
+            return
+
+        def loaded(projects):
+            dialog = PartDBProjectDialog(project.name, projects, project.partdb_parent, self)
+            if not dialog.exec():
+                return
+            parent = dialog.selected()
+            if parent == project.partdb_parent:
+                return
+            path = next((p.full_path for p in projects if p.id == parent), "")
+
+            def assigned(_config: Config) -> None:
+                if parent is None:
+                    self.notify(f"The BOM of '{project.name}' is no longer sent to Part-DB")
+                    return
+                answer = QMessageBox.question(self, "Part-DB", f"Send the BOM of '{project.name}' to Part-DB ({path}) now?")
+                if answer == QMessageBox.StandardButton.Yes:
+                    self.send_bom(pid)
+
+            self._mutate(
+                lambda c, _r: c.set_partdb_assignment(pid, parent),
+                f"Assign {project.name} to Part-DB project {path}" if parent else f"Remove Part-DB project of {project.name}",
+                assigned,
+            )
+
+        self.runner.run(
+            partdb.projects, loaded, lambda e: self.show_error(e, "Could not load the Part-DB projects"), label="Loading Part-DB projects…"
+        )
+
+    def send_bom(self, pid: str) -> None:
+        """Sync the BOM of the newest server version into the PCB's Part-DB project."""
+        partdb = self._partdb_or_ask()
+        if partdb is None:
+            return
+        project = self._projects[pid][1]
+
+        def work():
+            if self.workspace.is_cloned(project) and not self.workspace.changed_files(project):
+                return self._sync_partdb(project, self.workspace.path_for(project), partdb)
+            # Not downloaded, or with local changes: use the version on the server instead.
+            tmp = Path(tempfile.mkdtemp(prefix="kpm-bom-"))
+            try:
+                self.git.run("clone", "-q", "--depth", "1", self.clone_url(project.repo), str(tmp / "src"))
+                return self._sync_partdb(project, tmp / "src", partdb)
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        self._project_task(pid, "Sending BOM to Part-DB…", work, partial(self._partdb_synced, project), "Could not send the BOM to Part-DB")
+
     def show_orders(self, project_id: str = "", order_id: str = "") -> None:
         if self.config is None:
             return
@@ -1393,6 +1495,11 @@ class MainWindow(QMainWindow):
                 else:
                     menu.addAction("Rename Template…", lambda: self.convert_to_template(key))
                     menu.addAction("Stop Using as Template", lambda: self.stop_template(key))
+                if self.config.partdb_url:
+                    menu.addSeparator()
+                    menu.addAction("Part-DB Project…", lambda: self.assign_partdb(key))
+                    if self._projects[key][1].partdb_parent:
+                        menu.addAction("Send BOM to Part-DB", lambda: self.send_bom(key))
                 menu.addSeparator()
                 menu.addAction("Mark as Ordered…", lambda: self.mark_ordered(key))
                 orders = self.config.orders_for(key)
@@ -1429,7 +1536,10 @@ class MainWindow(QMainWindow):
                     organizations = self.forge.owners()[1:]
             except ForgeError:
                 pass  # offline - the project config section is simply not shown
-        dialog = SettingsDialog(self.settings, organizations, default_owner, self)
+        partdb_url = self.config.partdb_url if self.config is not None else None
+        dialog = SettingsDialog(
+            self.settings, organizations, default_owner, self, partdb_url=partdb_url, partdb_token=get_partdb_token(partdb_url or "")
+        )
         result = dialog.exec()
         if result == SettingsDialog.CHANGE_ACCOUNT:
             if self._ensure_account(force_dialog=True):
@@ -1448,6 +1558,11 @@ class MainWindow(QMainWindow):
                     lambda c, _r: setattr(c, "default_owner", new_owner),
                     f"Set default organization to {new_owner}" if new_owner else "Clear default organization",
                 )
+            if dialog.partdb_result is not None and self.config is not None:
+                url, token = dialog.partdb_result
+                set_partdb_token(url or partdb_url or "", token)
+                if url != self.config.partdb_url:
+                    self._mutate(lambda c, _r: c.set_partdb_url(url), f"Use Part-DB at {url}" if url else "Stop using Part-DB")
             if (self.settings.workspace, self.settings.clone_protocol) != old:
                 self.workspace = Workspace(self.git, Path(self.settings.workspace).expanduser())
                 self._refresh_meta(fetch=False)

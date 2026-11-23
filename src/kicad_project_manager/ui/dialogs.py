@@ -25,11 +25,14 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from ..forge import FORGES, Forge, ForgeError, Repo, User, guess_kind, make_forge
+from ..partdb import PartDB, PartDBError, PartDBProject, normalize_url
 from ..settings import Settings
 from ..updater import updates_supported, version_text
 from ..workspace import find_kicad_tool
@@ -633,11 +636,35 @@ class OrderDialog(QDialog):
 class SettingsDialog(QDialog):
     CHANGE_ACCOUNT, CHANGE_CONFIG, CHECK_UPDATES = 2, 3, 4
 
-    def __init__(self, settings: Settings, organizations: list[str] | None = None, default_owner: str = "", parent=None):
+    def __init__(
+        self,
+        settings: Settings,
+        organizations: list[str] | None = None,
+        default_owner: str = "",
+        parent=None,
+        partdb_url: str | None = None,
+        partdb_token: str = "",
+    ):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(560)
         self.settings = settings
+        # Part-DB: the URL is shared through the project list (None: no project list open), the token is personal.
+        self._partdb_old = (partdb_url or "", partdb_token)
+        self.partdb_result: tuple[str, str] | None = None  # (url, token) after a successful save
+        self.partdb_url = QLineEdit(partdb_url or "")
+        self.partdb_url.setPlaceholderText("https://partdb.example.com")
+        self.partdb_token = QLineEdit(partdb_token)
+        self.partdb_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.partdb_token.setPlaceholderText("Paste your Part-DB API token")
+        self.partdb_help = QLabel()
+        self.partdb_help.setWordWrap(True)
+        self.partdb_help.setOpenExternalLinks(True)
+        self.partdb_help.setTextFormat(Qt.TextFormat.RichText)
+        self.partdb_help.setStyleSheet("color: palette(placeholder-text);")
+        self.partdb_url.textChanged.connect(self._update_partdb_help)
+        self._update_partdb_help()
+        self.error = _error_label()
         self.workspace = QLineEdit(settings.workspace)
         self.kicad = QLineEdit(settings.kicad_path)
         self.kicad.setPlaceholderText(find_kicad_tool("kicad") or "not found - please select")
@@ -698,6 +725,13 @@ class SettingsDialog(QDialog):
         version = QLabel(f"KiCad Project Manager {version_text()}")
         version.setStyleSheet("color: palette(placeholder-text);")
 
+        partdb = QGroupBox("Part-DB")
+        partdb_form = QFormLayout(partdb)
+        partdb_form.addRow("Server:", self.partdb_url)
+        partdb_form.addRow("API token:", self.partdb_token)
+        partdb_form.addRow(self.partdb_help)
+        partdb.setEnabled(partdb_url is not None)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
@@ -706,6 +740,9 @@ class SettingsDialog(QDialog):
         if self.default_owner is not None:
             layout.addSpacing(12)
             layout.addWidget(project_config)
+        layout.addSpacing(12)
+        layout.addWidget(partdb)
+        layout.addWidget(self.error)
         layout.addSpacing(12)
         layout.addWidget(account)
         layout.addLayout(row)
@@ -733,7 +770,40 @@ class SettingsDialog(QDialog):
         row.addWidget(button)
         return widget
 
+    def _update_partdb_help(self, *_args) -> None:
+        url = normalize_url(self.partdb_url.text()) if self.partdb_url.text().strip() else ""
+        where = f'<a href="{url}/en/user/settings">your Part-DB user settings</a>' if url else "your Part-DB user settings"
+        self.partdb_help.setText(
+            f"Create an API token in {where} (<i>API tokens</i>) with <b>Edit</b> access or higher. "
+            "The BOM of a PCB is sent to its Part-DB project every time it is saved to the server. "
+            "The server applies to everyone using this project list; the token is only yours."
+        )
+
+    def _check_partdb(self) -> bool:
+        url = normalize_url(self.partdb_url.text()) if self.partdb_url.text().strip() else ""
+        token = self.partdb_token.text().strip()
+        if (url, token) == self._partdb_old:
+            return True
+        if token and not url:
+            self.error.setText("Please enter the Part-DB server address.")
+        elif not token:
+            self.partdb_result = (url, "")
+            return True
+        else:
+            try:
+                with _WaitCursor():
+                    PartDB(url, token, timeout=15).check_token()
+            except PartDBError as e:
+                self.error.setText(str(e))
+            else:
+                self.partdb_result = (url, token)
+                return True
+        self.error.show()
+        return False
+
     def _save(self) -> None:
+        if not self._check_partdb():
+            return
         self._apply()
         self.accept()
 
@@ -744,3 +814,55 @@ class SettingsDialog(QDialog):
         self.settings.clone_protocol = self.protocol.currentData()
         self.settings.color_scheme = self.color_scheme.currentData()
         self.settings.check_updates = self.check_updates.isChecked()
+
+
+class PartDBProjectDialog(QDialog):
+    """Pick the Part-DB project a PCB's BOM project is created in."""
+
+    def __init__(self, pcb_name: str, projects: list[PartDBProject], current: int | None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Part-DB project - {pcb_name}")
+        self.setMinimumSize(520, 480)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        none = QTreeWidgetItem(["(none - don't send the BOM to Part-DB)"])
+        none.setData(0, Qt.ItemDataRole.UserRole, 0)
+        self.tree.addTopLevelItem(none)
+        items: dict[int, QTreeWidgetItem] = {}
+        for p in projects:
+            item = QTreeWidgetItem([p.name])
+            item.setData(0, Qt.ItemDataRole.UserRole, p.id)
+            item.setToolTip(0, p.full_path)
+            items[p.id] = item
+        for p in sorted(projects, key=lambda p: p.name.casefold()):
+            parent_item = items.get(p.parent_id) if p.parent_id else None
+            if parent_item is not None:
+                parent_item.addChild(items[p.id])
+            else:
+                self.tree.addTopLevelItem(items[p.id])
+        selected = items.get(current) if current else none
+        if selected is None:
+            selected = none
+        self.tree.setCurrentItem(selected)
+        self.tree.scrollToItem(selected)
+        if selected is not none and selected.parent():
+            selected.parent().setExpanded(True)
+        self.tree.itemDoubleClicked.connect(lambda *_: self.accept())
+
+        hint = QLabel(
+            f"A Part-DB project named <b>{pcb_name}</b> is created inside the project you choose, "
+            "and its BOM is kept identical to the KiCad BOM each time the PCB is saved to the server."
+        )
+        hint.setWordWrap(True)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(hint)
+        layout.addWidget(self.tree)
+        layout.addWidget(buttons)
+
+    def selected(self) -> int | None:
+        item = self.tree.currentItem()
+        value = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else 0
+        return int(value) or None

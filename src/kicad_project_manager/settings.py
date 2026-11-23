@@ -80,31 +80,35 @@ def _token_key(server_url: str, username: str) -> str:
     return f"{server_url.rstrip('/')}|{username}"
 
 
-def get_token(server_url: str, username: str) -> str:
-    if not server_url or not username:
-        return ""
+def _get_secret(key: str) -> str:
     try:
         import keyring
 
-        token = keyring.get_password(_KEYRING_SERVICE, _token_key(server_url, username))
-        if token:
-            return token
+        secret = keyring.get_password(_KEYRING_SERVICE, key)
+        if secret:
+            return secret
     except Exception:
         pass
     try:
-        return json.loads(_token_file().read_text(encoding="utf-8")).get(_token_key(server_url, username), "")
+        return json.loads(_token_file().read_text(encoding="utf-8")).get(key, "")
     except (OSError, ValueError):
         return ""
 
 
-def set_token(server_url: str, username: str, token: str) -> None:
-    key = _token_key(server_url, username)
+def _set_secret(key: str, secret: str) -> None:
     try:
         import keyring
 
-        keyring.set_password(_KEYRING_SERVICE, key, token)
-        if keyring.get_password(_KEYRING_SERVICE, key) == token:
-            return
+        if secret:
+            keyring.set_password(_KEYRING_SERVICE, key, secret)
+            if keyring.get_password(_KEYRING_SERVICE, key) == secret:
+                _drop_file_secret(key)
+                return
+        else:
+            try:
+                keyring.delete_password(_KEYRING_SERVICE, key)
+            except Exception:
+                pass
     except Exception:
         pass
     path = _token_file()
@@ -113,7 +117,45 @@ def set_token(server_url: str, username: str, token: str) -> None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         data = {}
-    data[key] = token
+    if secret:
+        data[key] = secret
+    else:
+        data.pop(key, None)
     path.touch(mode=0o600, exist_ok=True)
     path.write_text(json.dumps(data), encoding="utf-8")
     os.chmod(path, 0o600)
+
+
+def _drop_file_secret(key: str) -> None:
+    path = _token_file()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if data.pop(key, None) is not None:
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def get_token(server_url: str, username: str) -> str:
+    if not server_url or not username:
+        return ""
+    return _get_secret(_token_key(server_url, username))
+
+
+def set_token(server_url: str, username: str, token: str) -> None:
+    _set_secret(_token_key(server_url, username), token)
+
+
+def _partdb_key(url: str) -> str:
+    return f"partdb|{url.strip().rstrip('/')}"
+
+
+def get_partdb_token(url: str) -> str:
+    """This user's Part-DB API token for the server at ``url``."""
+    return _get_secret(_partdb_key(url)) if url.strip() else ""
+
+
+def set_partdb_token(url: str, token: str) -> None:
+    """Store (or with an empty ``token``, forget) the Part-DB API token for ``url``."""
+    if url.strip():
+        _set_secret(_partdb_key(url), token)

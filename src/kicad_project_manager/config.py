@@ -21,11 +21,13 @@ from pathlib import Path
 
 from .git import Git, GitError
 
-FORMAT_VERSION = 2  # newest format this version can read
+FORMAT_VERSION = 3  # newest format this version can read
 # Format 2 added "orders". Older versions would silently drop them when saving, so files
 # holding orders are marked as format 2 (older versions then ask to update). Files without
 # orders stay format 1, so teammates on older versions can keep working until the first order.
 ORDERS_FORMAT_VERSION = 2
+# Format 3 added the Part-DB server and per-project Part-DB assignments, marked the same way.
+PARTDB_FORMAT_VERSION = 3
 CONFIG_FILE = "kicad-projects.json"
 PREVIEW_DIR = "previews"
 TEMPLATES_DIR = "templates"
@@ -66,6 +68,8 @@ class Project:
     repo: str  # "owner/name" on the git server (owner may contain "/" on GitLab)
     description: str = ""
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    partdb_parent: int | None = None  # Part-DB project the PCB's BOM project is created in
+    partdb_project: int | None = None  # the PCB's own Part-DB project, created by the app
 
     @property
     def owner(self) -> str:
@@ -79,11 +83,29 @@ class Project:
         d = {"id": self.id, "name": self.name, "repo": self.repo}
         if self.description:
             d["description"] = self.description
+        if self.partdb_parent:
+            d["partdb_parent"] = self.partdb_parent
+            if self.partdb_project:
+                d["partdb_project"] = self.partdb_project
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> Project:
-        return cls(name=d["name"], repo=d["repo"], description=d.get("description", ""), id=d.get("id") or uuid.uuid4().hex)
+        return cls(
+            name=d["name"],
+            repo=d["repo"],
+            description=d.get("description", ""),
+            id=d.get("id") or uuid.uuid4().hex,
+            partdb_parent=_optional_int(d.get("partdb_parent")),
+            partdb_project=_optional_int(d.get("partdb_project")),
+        )
+
+
+def _optional_int(value) -> int | None:
+    try:
+        return int(value) or None
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -189,12 +211,18 @@ class Config:
     root: Folder = field(default_factory=lambda: Folder(""))
     templates: dict[str, str] = field(default_factory=dict)  # template name -> repo of the project it is made from
     orders: list[Order] = field(default_factory=list)
+    partdb_url: str = ""  # Part-DB server shared by the team; each user has their own token
 
     # -- serialization -------------------------------------------------------
 
+    def _format(self) -> int:
+        if self.partdb_url or any(p.partdb_parent for _, p in self.iter_projects()):
+            return PARTDB_FORMAT_VERSION
+        return ORDERS_FORMAT_VERSION if self.orders else 1
+
     def to_dict(self) -> dict:
-        return {
-            "format": ORDERS_FORMAT_VERSION if self.orders else 1,
+        d = {
+            "format": self._format(),
             "name": self.name,
             "server_url": self.server_url,
             "default_owner": self.default_owner,
@@ -204,6 +232,9 @@ class Config:
             "templates": dict(sorted(self.templates.items(), key=lambda item: item[0].casefold())),
             "orders": [o.to_dict() for o in sorted(self.orders, key=lambda o: (o.ordered_on, o.id))],
         }
+        if self.partdb_url:
+            d["partdb_url"] = self.partdb_url
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> Config:
@@ -217,6 +248,7 @@ class Config:
             root=Folder.from_dict({"name": "", "folders": d.get("folders", []), "projects": d.get("projects", [])}),
             templates=dict(d.get("templates", {})),
             orders=[Order.from_dict(o) for o in d.get("orders", [])],
+            partdb_url=d.get("partdb_url", ""),
         )
 
     # -- lookup --------------------------------------------------------------
@@ -383,6 +415,21 @@ class Config:
             name, n = counts.get(key, (o.manufacturer, 0))
             counts[key] = (name, n + 1)
         return [name for name, _n in sorted(counts.values(), key=lambda item: (-item[1], item[0].casefold()))]
+
+
+    # -- Part-DB -------------------------------------------------------------
+
+    def set_partdb_url(self, url: str) -> None:
+        self.partdb_url = url.strip().rstrip("/")
+
+    def set_partdb_assignment(self, project_id: str, parent: int | None, subproject: int | None = None) -> None:
+        """Assign the Part-DB project the PCB's BOM project lives in (``None`` removes it)."""
+        project = self.find_project(project_id)[1]
+        if project.partdb_parent != parent:
+            project.partdb_project = None  # a new parent gets its own subproject
+        project.partdb_parent = parent or None
+        if subproject is not None:
+            project.partdb_project = subproject or None
 
 
 README_TEXT = """# {name}

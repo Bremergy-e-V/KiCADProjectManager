@@ -21,6 +21,7 @@ Git runs underneath, but nobody has to set it up or type a git command.
 - **Convert to Template** (right-click a project) offers a project as a template that everyone can pick under *New Project*. The project stays a normal project: open it, change it and save it to the server, and new projects start from that version.
 - **Revert to Server State** (right-click a project) throws away all your local changes, including saves that never reached the server, after asking for confirmation.
 - **Mark as Ordered** (right-click a project) records that the newest server version of a board was ordered: where, when, how many and any notes, plus who ordered it. The version is also tagged in the project repository (e.g. `ordered/2026-11-23-JLCPCB`), so the exact files that went to the manufacturer are easy to find. The *Ordered* submenu lists the earlier orders of a project.
+- **Part-DB BOMs.** Assign a [Part-DB](https://github.com/Part-DB/Part-DB-server) project to a PCB (right-click → *Part-DB Project…*). Every time the PCB is saved to the server, its KiCad BOM is sent to Part-DB: a project named after the PCB is created inside the assigned one, and its BOM entries are kept identical to the KiCad BOM (added, updated and removed as the schematic changes, while hand-written comments in Part-DB stay). Parts are matched by the fields Part-DB's KiCad library puts into the symbols (*Part-DB ID*, or *ID*/*PARTDB* in older libraries), then by manufacturer part number. Parts that cannot be found are added as plain text entries. *Send BOM to Part-DB* does the same at any time.
 - **Orders** (toolbar) opens a window listing all orders of all projects. Click a column header to sort, search or pick a project to filter, and double-click an order to see the ordered version on the server. When you delete an order, you can also delete its git tag.
 - **Save to server** uploads your changes with a short description. If a teammate changed something else in the meantime, the two sets of changes are combined automatically. If you both changed the same thing, nothing is lost: your version goes to a separate branch on the server and you get a clear message (see [Conflicts](#conflicts)).
 - **No git setup needed.** You sign in with a personal access token. The app passes it to git itself, so there are no SSH keys or credential helpers to configure, and the token is never written into a remote URL. The token is kept in the system keychain, and commits are made with your account's name.
@@ -57,6 +58,8 @@ After installing, search for **KiCad Project Manager** in the start menu or your
    | GitLab | *Preferences → Access tokens*, with the **api** scope. |
 
 2. **Choose the config repository.** Pick your team's existing config repository. To start fresh, pick an empty repository or click *Create new repository…*. In that case the app sets up a new project list in it and asks for a name and the default owner (organization or group) for new projects.
+
+3. **Optional: Part-DB.** In *Settings → Part-DB*, enter the Part-DB server (it is shared with everyone using the project list) and your personal API token. Create the token in Part-DB under *User settings → API tokens* with **Edit** access or higher; read-only tokens are rejected.
 
 ## How it works
 
