@@ -159,6 +159,17 @@ class Forge(ABC):
     def create_tag(self, full_name: str, tag: str, sha: str, message: str = "") -> None:
         """Create the tag ``tag`` on commit ``sha``. Raises :class:`TagExists` if it already exists."""
 
+    def delete_tag(self, full_name: str, tag: str) -> None:
+        """Delete the tag ``tag``. A tag that no longer exists is not an error."""
+        try:
+            self._request("DELETE", self._tag_path(full_name, tag))
+        except ForgeError as e:
+            if e.status != 404:
+                raise
+
+    @abstractmethod
+    def _tag_path(self, full_name: str, tag: str) -> str: ...
+
     def repo_web_url(self, full_name: str) -> str:
         return f"{self.url}/{full_name}"
 
@@ -239,6 +250,10 @@ class GiteaForge(Forge):
             if e.status in (409, 422):
                 raise TagExists(e.status, str(e)) from None
             raise
+
+    def _tag_path(self, full_name: str, tag: str) -> str:
+        owner, name = split_repo(full_name)
+        return f"/repos/{quote(owner)}/{quote(name)}/tags/{quote(tag, safe='/')}"
 
     def tree_web_url(self, full_name: str, ref: str) -> str:
         kind = "commit" if _is_commit_id(ref) else "tag"
@@ -350,6 +365,10 @@ class GitHubForge(Forge):
                 raise TagExists(e.status, str(e)) from None
             raise
 
+    def _tag_path(self, full_name: str, tag: str) -> str:
+        owner, name = split_repo(full_name)
+        return f"/repos/{quote(owner)}/{quote(name)}/git/refs/tags/{quote(tag, safe='/')}"
+
     @classmethod
     def token_help(cls, url: str) -> str:
         base = url or cls.default_url
@@ -442,6 +461,9 @@ class GitLabForge(Forge):
             if e.status in (400, 409) and "already exists" in str(e).lower():
                 raise TagExists(e.status, str(e)) from None
             raise
+
+    def _tag_path(self, full_name: str, tag: str) -> str:
+        return f"/projects/{self._id(full_name)}/repository/tags/{quote(tag, safe='')}"
 
     def tree_web_url(self, full_name: str, ref: str) -> str:
         return f"{self.url}/{full_name}/-/tree/{quote(ref, safe='/')}"

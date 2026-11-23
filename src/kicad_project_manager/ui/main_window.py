@@ -17,6 +17,7 @@ from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -1325,12 +1326,30 @@ class MainWindow(QMainWindow):
         self._mutate(lambda c, _r: c.update_order(order.id, **values), f"Edit order of {order.project_name}")
 
     def _delete_order(self, order: Order) -> None:
-        text = f"Delete the order '{format_order(order)}' of {order.project_name}?"
-        if order.tag:
-            text += f"\n\nThe git tag '{order.tag}' stays in the project repository."
-        if QMessageBox.question(self.orders_window or self, "Delete order", text) != QMessageBox.StandardButton.Yes:
+        box = QMessageBox(
+            QMessageBox.Icon.Question,
+            "Delete order",
+            f"Delete the order '{format_order(order)}' of {order.project_name}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            self.orders_window or self,
+        )
+        # Only offer to delete the tag if no other order points at it.
+        shared = any(o.id != order.id and o.tag == order.tag and o.repo.casefold() == order.repo.casefold() for o in self.config.orders)
+        delete_tag = None
+        if order.tag and not shared:
+            delete_tag = QCheckBox(f"Also delete the git tag '{order.tag}' on the server")
+            delete_tag.setChecked(True)
+            box.setCheckBox(delete_tag)
+        if box.exec() != QMessageBox.StandardButton.Yes:
             return
         self._mutate(lambda c, _r: c.remove_order(order.id), f"Delete order of {order.project_name}")
+        if delete_tag is not None and delete_tag.isChecked():
+            self.runner.run(
+                partial(self.forge.delete_tag, order.repo, order.tag),
+                lambda _r: self.notify(f"Deleted the git tag '{order.tag}' of {order.project_name}"),
+                lambda e: self.show_error(e, f"Could not delete the git tag '{order.tag}'"),
+                label=f"Deleting tag {order.tag}…",
+            )
 
     # ---------------------------------------------------------- menus etc --
 

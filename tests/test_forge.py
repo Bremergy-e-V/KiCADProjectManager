@@ -49,6 +49,9 @@ class FakeServer:
             def do_POST(self):
                 self._handle("POST")
 
+            def do_DELETE(self):
+                self._handle("DELETE")
+
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.httpd.server_port}"
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -223,3 +226,23 @@ def test_gitlab_head_commit_and_tag(server):
     with pytest.raises(TagExists):
         forge.create_tag("hw/old", "ordered/t", "beef")
     assert forge.tree_web_url("hw/motor", "ordered/t") == f"{server.url}/hw/motor/-/tree/ordered/t"
+
+
+@pytest.mark.parametrize(
+    ("kind", "repo", "path"),
+    [
+        ("gitea", "PCB/a", "/api/v1/repos/PCB/a/tags/ordered/2026-11-23-JLCPCB"),
+        ("github", "o/a", "/api/v3/repos/o/a/git/refs/tags/ordered/2026-11-23-JLCPCB"),
+        ("gitlab", "hw/motor", "/api/v4/projects/hw%2Fmotor/repository/tags/ordered%2F2026-11-23-JLCPCB"),
+    ],
+)
+def test_delete_tag(server, kind, repo, path):
+    forge = make_forge(kind, server.url, "tok")
+    server.routes[("DELETE", path)] = (204, None)
+    forge.delete_tag(repo, "ordered/2026-11-23-JLCPCB")
+    assert server.last("DELETE", path)
+    del server.routes[("DELETE", path)]
+    forge.delete_tag(repo, "ordered/2026-11-23-JLCPCB")  # already gone (404): not an error
+    server.routes[("DELETE", path)] = (403, {"message": "forbidden"})
+    with pytest.raises(ForgeError):
+        forge.delete_tag(repo, "ordered/2026-11-23-JLCPCB")
